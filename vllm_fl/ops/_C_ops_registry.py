@@ -98,3 +98,57 @@ def register_op_schemas():
             pass
 
     register_op_schemas._lib = lib
+
+    # Register _C_cache_ops fallback implementations for platforms without
+    # native C++ cache kernels (e.g. Hygon with empty-device vLLM build).
+    _register_cache_ops_fallbacks()
+
+
+def _register_cache_ops_fallbacks():
+    """Register PyTorch fallback impls for _C_cache_ops if not already present."""
+    if getattr(_register_cache_ops_fallbacks, "_done", False):
+        return
+
+    # If the native _C_cache_ops already has concat_and_cache_mla, skip.
+    if hasattr(torch.ops, "_C_cache_ops") and hasattr(
+        torch.ops._C_cache_ops, "concat_and_cache_mla"
+    ):
+        _register_cache_ops_fallbacks._done = True
+        return
+
+    try:
+        cache_lib = torch.library.Library("_C_cache_ops", "FRAGMENT")
+    except Exception:
+        # Library already exists or can't be created
+        _register_cache_ops_fallbacks._done = True
+        return
+
+    # Define schema
+    _CACHE_OPS_SCHEMAS = [
+        'concat_and_cache_mla(Tensor kv_c, Tensor k_pe,'
+        ' Tensor! kv_cache, Tensor slot_mapping,'
+        ' str kv_cache_dtype, Tensor scale) -> ()',
+    ]
+
+    for schema in _CACHE_OPS_SCHEMAS:
+        op_name = schema.split("(")[0].strip()
+        if hasattr(torch.ops._C_cache_ops, op_name):
+            continue
+        try:
+            cache_lib.define(schema)
+        except Exception as e:
+            logger.debug(
+                "Failed to define _C_cache_ops schema '%s': %s", op_name, e
+            )
+
+    # Register CUDA dispatch (covers ROCm/HIP as well)
+    from vllm_fl.ops._cache_ops_fallback import concat_and_cache_mla
+
+    try:
+        cache_lib.impl("concat_and_cache_mla", concat_and_cache_mla, "CUDA")
+    except Exception as e:
+        logger.debug("Failed to register concat_and_cache_mla fallback: %s", e)
+
+    _register_cache_ops_fallbacks._done = True
+    _register_cache_ops_fallbacks._lib = cache_lib
+    logger.info("Registered _C_cache_ops PyTorch fallback implementations")
