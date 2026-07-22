@@ -21,7 +21,41 @@ from typing import Optional, Union
 
 import torch
 
+from vllm.logger import init_logger
 from vllm_fl.dispatch.backends.base import Backend
+
+logger = init_logger(__name__)
+
+_hygon_mla_patched = False
+
+
+def _patch_flash_attn_for_hygon():
+    """
+    On Hygon platform, patch vLLM's MLA modules for TRITON_MLA compatibility:
+    flash_attn_varlen_func for prefill (same issue as MetaX: vllm_flash_attn
+    C extension unavailable, but ROCm-compatible flash_attn package is present).
+    """
+    global _hygon_mla_patched
+    if _hygon_mla_patched:
+        return
+
+    import vllm.model_executor.layers.attention.mla_attention as mla_mod
+
+    if mla_mod.flash_attn_varlen_func is None:
+        try:
+            from flash_attn import flash_attn_varlen_func
+        except ImportError as e:
+            raise RuntimeError(
+                "Hygon platform requires flash_attn package for MLA prefill. "
+                "Please install the ROCm-compatible flash_attn."
+            ) from e
+
+        mla_mod.flash_attn_varlen_func = flash_attn_varlen_func
+        mla_mod.is_vllm_fa = False
+        logger.info("Patched flash_attn_varlen_func from flash_attn package "
+                    "for Hygon MLA prefill support")
+
+    _hygon_mla_patched = True
 
 
 class HygonBackend(Backend):
@@ -135,6 +169,9 @@ class HygonBackend(Backend):
 
             if rocm_aiter_ops.is_mla_enabled():
                 return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
+            _patch_flash_attn_for_hygon()
+            logger.info("attention backend hygon dispatch: "
+                        "using TritonMLA for MLA attention (aiter MLA unavailable)")
             return AttentionBackendEnum.TRITON_MLA.get_path()
 
         if use_sparse:
