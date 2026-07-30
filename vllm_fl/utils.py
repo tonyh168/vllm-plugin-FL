@@ -4,14 +4,22 @@ import json
 import os
 from typing import Optional, Tuple
 
-import flag_gems
-try:
-    # FlagGems<=5.0.2: DeviceDetector lives in device.
-    from flag_gems.runtime.backend.device import DeviceDetector
-except (ImportError, FileNotFoundError):
-    # FlagGems>5.0.2: DeviceDetector lives in device_finder.
-    from flag_gems.runtime.backend.device_finder import DeviceDetector
-from flag_gems.runtime import backend
+def _import_flag_gems():
+    import flag_gems
+    return flag_gems
+
+
+def _import_device_detector():
+    try:
+        from flag_gems.runtime.backend.device import DeviceDetector
+    except (ImportError, FileNotFoundError):
+        from flag_gems.runtime.backend.device_finder import DeviceDetector
+    return DeviceDetector
+
+
+def _import_backend():
+    from flag_gems.runtime import backend
+    return backend
 
 _OP_CONFIG: Optional[dict[str, str]] = None
 
@@ -51,6 +59,8 @@ VENDOR_DEVICE_MAP: dict[str, dict[str, str]] = {
     "enflame": {"device_type": "gcu", "device_name": "gcu"},
     # Registered backend: vendor/txda
     "tsingmicro": {"device_type": "txda", "device_name": "txda"},
+    # Registered backend: vendor/kunlunxin
+    "kunlunxin": {"device_type": "xpu", "device_name": "xpu"},
 }
 
 
@@ -217,32 +227,70 @@ _load_op_config_from_env()
 
 
 class DeviceInfo:
+    """Platform device information provider.
+
+    When VLLM_FL_VENDOR_NAME (and optionally VLLM_FL_DEVICE_TYPE,
+    VLLM_FL_DISPATCH_KEY) environment variables are set, platform info
+    is resolved from env vars alone — no flag_gems import required.
+    Otherwise falls back to flag_gems DeviceDetector.
+    """
+
     def __init__(self):
-        self.device = DeviceDetector()
-        self.supported_device = ["nvidia", "ascend", "metax", "mthreads", "sunrise", "thead", "gcu"]
-        backend.set_torch_backend_device_fn(self.device.vendor_name)
+        self.supported_device = ["nvidia", "ascend", "metax", "mthreads",
+                                 "sunrise", "thead", "gcu", "kunlunxin"]
+        env_vendor = os.environ.get("VLLM_FL_VENDOR_NAME", "").strip()
+        if env_vendor:
+            self._vendor_name = env_vendor
+            self._device_type = (
+                os.environ.get("VLLM_FL_DEVICE_TYPE", "").strip()
+                or VENDOR_DEVICE_MAP.get(env_vendor, {}).get("device_type", "cuda")
+            )
+            self._dispatch_key = (
+                os.environ.get("VLLM_FL_DISPATCH_KEY", "").strip()
+                or self._device_type
+            )
+            self._use_flaggems = False
+        else:
+            DeviceDetector = _import_device_detector()
+            self._backend_mod = _import_backend()
+            self.device = DeviceDetector()
+            self._vendor_name = self.device.vendor_name
+            self._device_type = self.device.name
+            self._dispatch_key = self.device.dispatch_key
+            self._backend_mod.set_torch_backend_device_fn(self._vendor_name)
+            self._use_flaggems = True
 
     @property
     def dispatch_key(self):
-        return self.device.dispatch_key
+        return self._dispatch_key
 
     @property
     def vendor_name(self):
-        return self.device.vendor_name
+        return self._vendor_name
 
     @property
     def device_type(self):
-        return self.device.name
+        return self._device_type
 
     @property
     def torch_device_fn(self):
-        # torch_device_fn is like 'torch.cuda' object
-        return backend.gen_torch_device_object()
+        if self._use_flaggems:
+            return self._backend_mod.gen_torch_device_object()
+        import torch
+        device_mod = getattr(torch, self._device_type, None)
+        if device_mod is None:
+            device_mod = torch.cuda
+        return device_mod
 
     @property
     def torch_backend_device(self):
-        # torch_backend_device is like 'torch.backend.cuda' object
-        return backend.get_torch_backend_device_fn()
+        if self._use_flaggems:
+            return self._backend_mod.get_torch_backend_device_fn()
+        import torch
+        backend_mod = getattr(torch.backends, self._device_type, None)
+        if backend_mod is None:
+            backend_mod = torch.backends.cuda
+        return backend_mod
 
     def get_supported_device(self):
         if self.vendor_name not in self.supported_device:
@@ -255,8 +303,7 @@ def get_flaggems_all_ops() -> list[str]:
     Get all FlagGems operator names from flag_gems._FULL_CONFIG.
     """
     try:
-        # _FULL_CONFIG is a tuple of (op_name, function, ...) tuples
-        # Some entries have 2 elements, some have 3
+        flag_gems = _import_flag_gems()
         ops = [entry[0] for entry in flag_gems._FULL_CONFIG]
         return ops
     except Exception:
