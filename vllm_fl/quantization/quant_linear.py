@@ -4,8 +4,6 @@ import os
 from vllm.platforms import PlatformEnum, current_platform
 from vllm_fl.utils import use_flaggems_op
 
-from .fp8 import FlagGemsFp8BlockScaledMMLinearKernel
-
 
 FLAGGEMS_FP8_BLOCK_GEMM_OP = "flaggems_fp8_block_gemm"
 
@@ -69,12 +67,15 @@ def add_oot_quant_kernel() -> None:
     if (
         current_platform.supports_fp8()
         and use_flaggems_op(FLAGGEMS_FP8_BLOCK_GEMM_OP)
-        and FlagGemsFp8BlockScaledMMLinearKernel
-        not in _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT]
     ):
-        _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT].insert(
-            0, FlagGemsFp8BlockScaledMMLinearKernel
-        )
+        from .fp8 import FlagGemsFp8BlockScaledMMLinearKernel
+        if (
+            FlagGemsFp8BlockScaledMMLinearKernel
+            not in _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT]
+        ):
+            _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT].insert(
+                0, FlagGemsFp8BlockScaledMMLinearKernel
+            )
 
     # WNA16 hooks below are self-gated on kernel availability and are a
     # no-op until the plugin's csrc-side operators are built.

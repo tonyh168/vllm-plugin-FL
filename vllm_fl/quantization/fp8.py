@@ -35,8 +35,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import DeepGemmFp8BlockScaledMMKernel
 from vllm.model_executor.utils import replace_parameter
 
-from flag_gems import w8a8_block_fp8_matmul
-
 def _flaggems_fp8_block_gemm_impl(
         input: torch.Tensor,
         weight: torch.Tensor,
@@ -45,6 +43,7 @@ def _flaggems_fp8_block_gemm_impl(
         block_size: list[int],
         output_dtype: torch.dtype,
 ) -> torch.Tensor:
+    from flag_gems import w8a8_block_fp8_matmul
     return w8a8_block_fp8_matmul(input, weight, input_scale, weight_scale, block_size, output_dtype=output_dtype)
 
 class FlagGemsFp8BlockScaledMMLinearKernel(Fp8BlockScaledDynamicMMLinearKernel):
