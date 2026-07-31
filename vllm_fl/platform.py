@@ -468,7 +468,7 @@ class PlatformFL(Platform):
 
     @classmethod
     def get_device_uuid(cls, device_id: int = 0) -> str:
-        if cls.device_type == "cuda":
+        if cls.device_type == "cuda" and cls.vendor_name == "nvidia":
             import pynvml
             pynvml.nvmlInit()
             physical_device_id = cls.device_id_to_physical_device_id(device_id)
@@ -519,6 +519,8 @@ class PlatformFL(Platform):
                 return None
             major, minor = gcu.get_device_capability(device_id)
             return DeviceCapability(major=major, minor=minor)
+        if cls.vendor_name == "kunlunxin":
+            return None
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
