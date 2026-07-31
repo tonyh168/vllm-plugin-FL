@@ -155,8 +155,9 @@ class ReferenceBackend(Backend):
         """
         Get the attention backend class path for reference (vLLM native).
 
-        This method returns the vLLM native flash attention backend path,
-        which serves as a fallback implementation.
+        This method returns the vLLM native attention backend path.
+        For platforms without FlashAttention support (no device_capability),
+        falls back to TritonAttention which uses Triton kernels.
 
         Args:
             use_mla: Whether to use Multi-head Latent Attention (MLA)
@@ -165,14 +166,19 @@ class ReferenceBackend(Backend):
         Returns:
             Fully qualified class path string (vLLM native backend)
         """
-        # Return vLLM's native flash attention backend as reference
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         if use_mla:
-            # vLLM native MLA backend
             if use_sparse:
                 return AttentionBackendEnum.FLASHMLA_SPARSE.get_path()
             return AttentionBackendEnum.FLASHMLA.get_path()
+
+        if current_platform.get_device_capability() is None:
+            if current_platform.vendor_name == "kunlunxin":
+                return AttentionBackendEnum.TRITON_ATTN.get_path()
+            return AttentionBackendEnum.FLASH_ATTN.get_path()
+
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     def moe_align_block_size(
