@@ -60,7 +60,7 @@ VENDOR_DEVICE_MAP: dict[str, dict[str, str]] = {
     # Registered backend: vendor/txda
     "tsingmicro": {"device_type": "txda", "device_name": "txda"},
     # Registered backend: vendor/kunlunxin
-    "kunlunxin": {"device_type": "xpu", "device_name": "xpu"},
+    "kunlunxin": {"device_type": "cuda", "device_name": "cuda"},
 }
 
 
@@ -247,7 +247,7 @@ class DeviceInfo:
             )
             self._dispatch_key = (
                 os.environ.get("VLLM_FL_DISPATCH_KEY", "").strip()
-                or self._device_type
+                or self._device_type.upper()
             )
             self._use_flaggems = False
         else:
