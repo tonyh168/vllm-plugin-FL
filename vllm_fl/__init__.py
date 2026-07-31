@@ -138,7 +138,15 @@ def register_router():
 
 def register_model():
     """Register FL-specific models not yet upstream."""
-    from vllm import ModelRegistry
+    try:
+        from vllm import ModelRegistry
+    except ImportError:
+        # In the registry inspection subprocess, vllm may not be fully
+        # initialized yet. Skip model registration in that context.
+        _register_flagcx_connector()
+        register_quant_linear()
+        register_router()
+        return
 
     _register_flagcx_connector()
 
