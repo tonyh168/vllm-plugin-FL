@@ -60,6 +60,14 @@ class ReferenceBackend(Backend):
 
         return router_gemm_bf16_fp32_torch(x, weight)
 
+    def dynamic_per_token_quant_int8(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from .impl.quantization import dynamic_per_token_quant_int8_torch
+
+        return dynamic_per_token_quant_int8_torch(x)
+
     def silu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.

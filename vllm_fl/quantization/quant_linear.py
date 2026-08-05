@@ -79,3 +79,14 @@ def add_oot_quant_kernel() -> None:
 
     register_fl_wna16_linear_kernel(_POSSIBLE_KERNELS)
     register_compressed_tensors_oot()
+
+    # compressed-tensors selects its Linear and MoE implementations while the
+    # model is being constructed. Install the FL adapters only after the OOT
+    # platform has inherited vLLM's native INT8 kernel candidates.
+    from .w8a8.linear import register_fl_w8a8_linear_kernel
+    from .w8a8.moe import install_fl_w8a8_moe_selector
+    from .w8a8.packed import install_packed_w8a8_scheme
+
+    register_fl_w8a8_linear_kernel(_POSSIBLE_INT8_KERNELS)
+    install_packed_w8a8_scheme()
+    install_fl_w8a8_moe_selector()

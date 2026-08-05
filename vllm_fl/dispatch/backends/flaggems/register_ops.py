@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import functools
 
-from vllm_fl.dispatch.types import OpImpl, BackendImplKind, BackendPriority
+from vllm_fl.dispatch.types import BackendImplKind, BackendPriority, OpImpl
 from vllm_fl.utils import use_flaggems_op
 
 
@@ -65,6 +65,18 @@ def register_builtins(registry) -> None:
             fn=_bind_is_available(
                 backend.router_gemm_bf16_fp32,
                 _has_flaggems_op("router_gemm"),
+            ),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        # Quantization
+        OpImpl(
+            op_name="dynamic_per_token_quant_int8",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(
+                backend.dynamic_per_token_quant_int8,
+                is_avail,
             ),
             vendor=None,
             priority=BackendPriority.DEFAULT,
