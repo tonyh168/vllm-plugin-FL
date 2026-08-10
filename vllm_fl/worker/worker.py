@@ -371,6 +371,32 @@ class WorkerFL(WorkerBase):
                 f"be less than or equal to the number of visible devices "
                 f"({visible_device_count})."
             )
+
+        # Fix for Iluvatar GPU multi-node deployment with Ray backend
+        # When using Ray distributed executor, Ray sets CUDA_VISIBLE_DEVICES
+        # for each worker, but the local_rank might still be out of range.
+        if (
+            current_platform.device_type == "cuda"
+            and self.parallel_config.distributed_executor_backend == "ray"
+            and os.environ.get("GEMS_VENDOR") == "iluvatar"
+        ):
+            device_count = (
+                current_platform.torch_device_fn.device_count()
+                if current_platform.torch_device_fn.is_available()
+                else 0
+            )
+            if device_count > 0 and self.local_rank >= device_count:
+                original_local_rank = self.local_rank
+                self.local_rank = self.local_rank % device_count
+                logger.info(
+                    "[Iluvatar Fix] Adjusted local_rank from %d to %d "
+                    "(device_count=%d, rank=%d) for Ray multi-node deployment",
+                    original_local_rank,
+                    self.local_rank,
+                    device_count,
+                    self.rank,
+                )
+
         self.device = torch.device(f"{current_platform.device_type}:{self.local_rank}")
         current_platform.set_device(self.device)
 
