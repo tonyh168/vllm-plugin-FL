@@ -180,6 +180,11 @@ class PlatformFL(Platform):
                 import vllm_fl.dispatch.backends.vendor.metax.patches  # noqa: F401
             except Exception as e:
                 logger.warning(f"Failed to import maca patches: {e}")
+        elif cls.vendor_name == "iluvatar":
+            try:
+                import vllm_fl.dispatch.backends.vendor.iluvatar.patches  # noqa: F401
+            except Exception as e:
+                logger.warning(f"Failed to import iluvatar patches: {e}")
         else:
             super().import_kernels()
 
