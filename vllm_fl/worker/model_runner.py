@@ -7151,7 +7151,7 @@ class ModelRunnerFL(
             corresponding memory buffer for KV cache.
         """
         import torch
-        from vllm.utils import get_dtype_size
+        from vllm.utils.torch_utils import get_dtype_size
 
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
