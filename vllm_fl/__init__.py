@@ -144,6 +144,31 @@ def register_model():
     except Exception as e:
         logger.warning(f"Failed to patch Qwen3.5 text-only models: {e}")
 
+    # Qwen3.5/Qwen3.8 text-only checkpoints are quantized from the VL model and
+    # carry mrope_section/mrope_interleaved in rope_parameters.  vLLM detects
+    # those keys and sets uses_mrope=True, then hits an assertion when the
+    # causal-LM model class doesn't implement SupportsMRoPE.  Strip them here
+    # so uses_mrope stays False for text-only inference.
+    try:
+        from vllm.model_executor.models import config as _model_config
+        _orig_qwen35moe_verify = staticmethod(
+            _model_config.Qwen3_5MoeForCausalLMConfig.__dict__["verify_and_update_config"]
+        )
+
+        @staticmethod
+        def _qwen35moe_verify_no_mrope(vllm_config):
+            _orig_qwen35moe_verify.__func__(vllm_config)
+            hf_text_config = vllm_config.model_config.hf_text_config
+            rope_parameters = getattr(hf_text_config, "rope_parameters", None)
+            if rope_parameters is not None:
+                rope_parameters.pop("mrope_section", None)
+                rope_parameters.pop("mrope_interleaved", None)
+
+        _model_config.Qwen3_5MoeForCausalLMConfig.verify_and_update_config = \
+            _qwen35moe_verify_no_mrope
+    except Exception as e:
+        logger.warning(f"Failed to patch Qwen3.5 MoE mrope keys: {e}")
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them
