@@ -7226,9 +7226,12 @@ class ModelRunnerFL(
                         # For kv-first (2, num_blocks, ...), num_blocks is at logical dim 1
                         # inv_order maps logical dims to permuted dims
                         num_blocks_pos_in_permuted = inv_order[1]
+                        # kv is at logical dim 0; K and V each occupy half of each padded page
+                        kv_pos_in_permuted = inv_order[0]
 
                         strides = list(torch.empty(permuted_kv_cache_shape).stride())
                         strides[num_blocks_pos_in_permuted] = page_stride
+                        strides[kv_pos_in_permuted] = page_stride // 2
 
                         kv_cache = torch.as_strided(
                             raw_tensor.view(dtype),
