@@ -378,7 +378,7 @@ class WorkerFL(WorkerBase):
         if (
             current_platform.device_type == "cuda"
             and self.parallel_config.distributed_executor_backend == "ray"
-            and os.environ.get("GEMS_VENDOR") == "iluvatar"
+            and getattr(current_platform, "vendor_name", None) == "iluvatar"
         ):
             device_count = (
                 current_platform.torch_device_fn.device_count()
