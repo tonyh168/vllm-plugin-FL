@@ -7150,6 +7150,9 @@ class ModelRunnerFL(
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        import torch
+        from vllm.utils import get_dtype_size
+
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
 
@@ -7212,9 +7215,6 @@ class ModelRunnerFL(
                             and len(kv_cache_shape) > 0
                             and kv_cache_shape[0] != kernel_num_blocks):
                         # kv-first layout with padded pages: use as_strided manually
-                        import torch
-                        from vllm.utils import get_dtype_size
-
                         permuted_kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
                         inv_order = [
                             kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
