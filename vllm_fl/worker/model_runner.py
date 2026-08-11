@@ -7204,14 +7204,47 @@ class ModelRunnerFL(
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
                     raw_tensor = kv_cache_raw_tensors[layer_name]
-                    kv_caches[layer_name] = _reshape_attention_kv_cache(
-                        raw_tensor,
-                        kv_cache_spec,
-                        kv_cache_shape,
-                        kv_cache_stride_order,
-                        kernel_num_blocks,
-                        packing,
-                    )
+                    # Workaround: FL backend uses kv-first layout (2, num_blocks, ...)
+                    # which is incompatible with vllm's padded KV page path that
+                    # requires num-blocks-first. Handle padded pages manually with as_strided.
+                    _orig_padded = kv_cache_spec.page_size_padded
+                    if (_orig_padded is not None
+                            and len(kv_cache_shape) > 0
+                            and kv_cache_shape[0] != kernel_num_blocks):
+                        # kv-first layout with padded pages: use as_strided manually
+                        import torch
+                        from vllm.utils import get_dtype_size
+
+                        permuted_kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+                        inv_order = [
+                            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
+                        ]
+                        dtype = kv_cache_spec.dtype
+                        dtype_size = get_dtype_size(dtype)
+                        page_stride = _orig_padded // dtype_size
+
+                        # For kv-first (2, num_blocks, ...), num_blocks is at logical dim 1
+                        # inv_order maps logical dims to permuted dims
+                        num_blocks_pos_in_permuted = inv_order[1]
+
+                        strides = list(torch.empty(permuted_kv_cache_shape).stride())
+                        strides[num_blocks_pos_in_permuted] = page_stride
+
+                        kv_cache = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=permuted_kv_cache_shape,
+                            stride=tuple(strides)
+                        )
+                        kv_caches[layer_name] = kv_cache.permute(*inv_order)
+                    else:
+                        kv_caches[layer_name] = _reshape_attention_kv_cache(
+                            raw_tensor,
+                            kv_cache_spec,
+                            kv_cache_shape,
+                            kv_cache_stride_order,
+                            kernel_num_blocks,
+                            packing,
+                        )
 
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
