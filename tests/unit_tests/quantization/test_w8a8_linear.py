@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -65,7 +64,7 @@ def test_w8a8_linear_accepts_only_canonical_dynamic_token_scheme(
 
 def test_w8a8_linear_registration_is_non_nvidia_and_idempotent(monkeypatch):
     monkeypatch.setattr(linear, "is_nvidia_platform", lambda: False)
-    monkeypatch.setattr(linear, "_flaggems_available", lambda: True)
+    monkeypatch.setattr(linear, "_scaled_mm_available", lambda: True)
     registry = {PlatformEnum.OOT: []}
 
     assert linear.register_fl_w8a8_linear_kernel(registry) is True
@@ -75,7 +74,7 @@ def test_w8a8_linear_registration_is_non_nvidia_and_idempotent(monkeypatch):
 
 def test_w8a8_linear_is_not_registered_on_nvidia(monkeypatch):
     monkeypatch.setattr(linear, "is_nvidia_platform", lambda: True)
-    monkeypatch.setattr(linear, "_flaggems_available", lambda: True)
+    monkeypatch.setattr(linear, "_scaled_mm_available", lambda: True)
     registry = {PlatformEnum.OOT: []}
 
     assert linear.register_fl_w8a8_linear_kernel(registry) is False
@@ -96,19 +95,17 @@ def test_w8a8_linear_nvidia_guard_precedes_flaggems_policy(monkeypatch):
     assert "NVIDIA" in reason
 
 
-def test_w8a8_linear_rejects_flaggems_without_returning_scaled_mm(
+def test_w8a8_linear_rejects_when_triton_scaled_mm_unavailable(
     monkeypatch,
 ):
-    flag_gems = ModuleType("flag_gems")
-    monkeypatch.delitem(sys.modules, "flag_gems.ops.scaled_mm", raising=False)
-    monkeypatch.delitem(sys.modules, "flag_gems.ops", raising=False)
-    monkeypatch.setitem(sys.modules, "flag_gems", flag_gems)
-    monkeypatch.setattr(linear, "find_spec", lambda name: object())
+    monkeypatch.setattr(linear, "_scaled_mm_available", lambda: False)
 
-    assert linear._flaggems_available() is False
+    supported, reason = linear.FLW8A8DynamicLinearKernel.is_supported()
+    assert supported is False
+    assert "triton_scaled_mm" in reason
 
 
-def test_w8a8_linear_quantizes_then_calls_flaggems_scaled_mm(monkeypatch):
+def test_w8a8_linear_quantizes_then_calls_scaled_mm(monkeypatch):
     calls = []
     x = torch.ones((2, 4), dtype=torch.bfloat16)
     x_q = torch.ones((2, 4), dtype=torch.int8)
@@ -122,14 +119,12 @@ def test_w8a8_linear_quantizes_then_calls_flaggems_scaled_mm(monkeypatch):
         "_dynamic_per_token_quant_int8",
         lambda value: (x_q, x_scale),
     )
-    flag_gems = ModuleType("flag_gems")
 
     def fake_scaled_mm(*args, **kwargs):
         calls.append((args, kwargs))
         return expected
 
-    flag_gems.scaled_mm = fake_scaled_mm
-    monkeypatch.setitem(sys.modules, "flag_gems", flag_gems)
+    monkeypatch.setattr(linear, "_resolve_scaled_mm", lambda: fake_scaled_mm)
 
     kernel = object.__new__(linear.FLW8A8DynamicLinearKernel)
     kernel.layer_param_names = [
@@ -224,7 +219,6 @@ def test_w8a8_linear_weight_layout_and_numerics_match_flaggems_contract(
         "_dynamic_per_token_quant_int8",
         dynamic_per_token_quant_int8,
     )
-    flag_gems = ModuleType("flag_gems")
 
     def fake_scaled_mm(
         x_q,
@@ -245,8 +239,7 @@ def test_w8a8_linear_weight_layout_and_numerics_match_flaggems_contract(
             output += bias.reshape(1, -1)
         return output.to(out_dtype)
 
-    flag_gems.scaled_mm = fake_scaled_mm
-    monkeypatch.setitem(sys.modules, "flag_gems", flag_gems)
+    monkeypatch.setattr(linear, "_resolve_scaled_mm", lambda: fake_scaled_mm)
 
     actual = kernel.apply_weights(layer, x, bias)
 

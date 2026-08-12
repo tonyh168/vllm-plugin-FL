@@ -92,8 +92,10 @@ class PlatformFL(Platform):
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
+        # Iluvatar devices are CUDA-alike for kernel compatibility
+        # They use torch.cuda interface and support CUDA-style kernels
         if self.vendor_name == "iluvatar":
-            return False
+            return True
         if self.device_type == "musa":
             return True
         if self.vendor_name == "hygon":
@@ -512,13 +514,18 @@ class PlatformFL(Platform):
             return DeviceCapability(major=major, minor=minor)
         # TODO: For PTPU/Sunrise devices, return None
         if cls.device_type == "ptpu":
-            return None        
+            return None
         if cls.device_type == "gcu":
             gcu = getattr(torch, "gcu", None)
             if gcu is None:
                 return None
             major, minor = gcu.get_device_capability(device_id)
             return DeviceCapability(major=major, minor=minor)
+        # Iluvatar GPUs report sm_71 via torch.cuda but support INT8 natively.
+        # Return None so vLLM's CUDA capability gates (e.g. W8A8 min sm_75)
+        # are skipped; the FL plugin is responsible for kernel correctness.
+        if cls.vendor_name == "iluvatar":
+            return None
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 

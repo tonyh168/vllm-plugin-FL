@@ -15,8 +15,6 @@
 
 from __future__ import annotations
 
-from importlib.util import find_spec
-
 import torch
 
 from vllm.model_executor.kernels.linear import (
@@ -37,34 +35,27 @@ FLAGGEMS_W8A8_LINEAR_OP = "w8a8_dynamic_per_token_linear"
 _dynamic_per_token_quant_int8 = CachedOp("dynamic_per_token_quant_int8")
 
 
-def _resolve_flaggems_scaled_mm():
-    """Resolve the returning ``scaled_mm`` API, not the output-buffer API.
+def _resolve_scaled_mm():
+    """Resolve a Triton-based scaled_mm that works on OOT CUDA-alike devices.
 
-    FlagGems 5.3 exposes only ``cutlass_scaled_mm(output, ...)``.  Besides
-    having a different call contract, its SM80 branch is not implemented on
-    PPU.  The generic returning API was added later and provides the Triton
-    INT8 fallback required by CUDA-alike OOT devices.
+    Uses vLLM's built-in triton_scaled_mm which is a pure Triton kernel
+    requiring no C extensions — works on any platform with Triton support.
     """
-    import flag_gems
+    from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
+        triton_scaled_mm,
+    )
 
-    scaled_mm = getattr(flag_gems, "scaled_mm", None)
-    if scaled_mm is None:
-        try:
-            from flag_gems.ops.scaled_mm import scaled_mm
-        except (ImportError, AttributeError) as exc:
-            raise RuntimeError(
-                "FlagGems W8A8 linear requires the returning scaled_mm API"
-            ) from exc
-    if not callable(scaled_mm):
-        raise RuntimeError("FlagGems scaled_mm is not callable")
-    return scaled_mm
+    def _adapted_scaled_mm(a, b, a_scale, b_scale, *, bias=None, out_dtype=None):
+        if out_dtype is None:
+            out_dtype = torch.float16
+        return triton_scaled_mm(a, b, a_scale, b_scale, out_dtype, bias)
+
+    return _adapted_scaled_mm
 
 
-def _flaggems_available() -> bool:
-    if find_spec("flag_gems") is None:
-        return False
+def _scaled_mm_available() -> bool:
     try:
-        _resolve_flaggems_scaled_mm()
+        _resolve_scaled_mm()
     except (ImportError, RuntimeError):
         return False
     return True
@@ -89,8 +80,8 @@ class FLW8A8DynamicLinearKernel(Int8ScaledMMLinearKernel):
             return False, "FL OOT kernels are disabled"
         if not use_flaggems_op(FLAGGEMS_W8A8_LINEAR_OP):
             return False, "FlagGems W8A8 linear is disabled by policy"
-        if not _flaggems_available():
-            return False, "FlagGems is not installed"
+        if not _scaled_mm_available():
+            return False, "triton_scaled_mm is not available"
         return True, None
 
     @classmethod
@@ -139,7 +130,7 @@ class FLW8A8DynamicLinearKernel(Int8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        scaled_mm = _resolve_flaggems_scaled_mm()
+        scaled_mm = _resolve_scaled_mm()
 
         weight, weight_scale, _, _, _ = self._get_layer_params(layer)
         original_shape = x.shape
@@ -158,7 +149,7 @@ class FLW8A8DynamicLinearKernel(Int8ScaledMMLinearKernel):
 
 def register_fl_w8a8_linear_kernel(registry: dict) -> bool:
     """Prepend the FL kernel on non-NVIDIA OOT platforms."""
-    if is_nvidia_platform() or not _flaggems_available():
+    if is_nvidia_platform() or not _scaled_mm_available():
         return False
 
     from vllm.platforms import PlatformEnum

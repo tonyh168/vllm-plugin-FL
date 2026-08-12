@@ -40,6 +40,11 @@ _PATCH_MARKER = "_vllm_fl_packed_w8a8"
 class CompressedTensorsPackedW8A8Int8(CompressedTensorsW8A8Int8):
     """Adapt packed weights to the selected dynamic-token W8A8 kernel."""
 
+    @classmethod
+    def get_min_capability(cls) -> int:
+        # FL platform provides its own INT8 kernels; bypass CUDA sm_75 gate.
+        return 0
+
     def __init__(self, layer_name: str | None = None) -> None:
         super().__init__(
             strategy=QuantizationStrategy.CHANNEL,
