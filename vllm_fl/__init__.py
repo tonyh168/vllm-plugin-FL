@@ -113,8 +113,9 @@ def register():
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     _get_op_config()
 
-    # Register FL-specific models (including Qwen3.5 hybrid patch)
-    register_model()
+    # NOTE: register_model() is deferred to PlatformFL.pre_register_and_update()
+    # to avoid accessing current_platform during platform resolution (causes
+    # re-entrant resolve → UnspecifiedPlatform on non-NVML devices).
 
     return "vllm_fl.platform.PlatformFL"
 

@@ -90,6 +90,11 @@ class PlatformFL(Platform):
     ### TODO(lms): dispatch device_control_env_var
     # device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
+    @classmethod
+    def pre_register_and_update(cls, parser=None) -> None:
+        from vllm_fl import register_model
+        register_model()
+
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
         # Iluvatar devices are CUDA-alike for kernel compatibility
