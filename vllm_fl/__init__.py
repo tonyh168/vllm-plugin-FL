@@ -141,6 +141,14 @@ def register_model():
     """Register FL-specific models not yet upstream."""
     from vllm import ModelRegistry
 
+    # Qwen3.5 text-only hybrid model compatibility for vLLM 0.20
+    # Must eagerly import to patch the upstream base class BEFORE
+    # _align_hybrid_block_size queries get_mamba_state_shape_from_config.
+    try:
+        import vllm_fl.models.qwen3_5  # noqa: F401 — patches upstream base
+    except Exception as e:
+        logger.warning(f"Failed to patch Qwen3.5 text-only models: {e}")
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them
