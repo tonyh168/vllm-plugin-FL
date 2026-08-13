@@ -113,6 +113,9 @@ def register():
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     _get_op_config()
 
+    # Register FL-specific models (including Qwen3.5 hybrid patch)
+    register_model()
+
     return "vllm_fl.platform.PlatformFL"
 
 def register_quant_linear():
