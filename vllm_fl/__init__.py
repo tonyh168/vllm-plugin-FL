@@ -176,9 +176,18 @@ def register_model():
     except Exception as e:
         logger.error(f"Register DeepseekV4 model error: {str(e)}")
 
-    # Register TeleChat mHC patches for DeepSeekV3-based models
+    # Register TeleChat4 model (config + architecture + mHC patches)
     try:
+        from vllm.transformers_utils.config import _CONFIG_REGISTRY
+        from transformers import DeepseekV3Config
+        _CONFIG_REGISTRY["telechat4"] = DeepseekV3Config
+
+        ModelRegistry.register_model(
+            "TeleChat4ForCausalLM",
+            "vllm.model_executor.models.deepseek_v2:DeepseekV3ForCausalLM"
+        )
+
         from vllm_fl.patches.deepseek_v2_mhc import apply_model_patches as telechat_mhc
         telechat_mhc()
     except Exception as e:
-        logger.error("Register TeleChat mHC patch error: %s", str(e))
+        logger.error("Register TeleChat4 model error: %s", str(e))
