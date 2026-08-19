@@ -150,6 +150,20 @@ def register_model():
     except Exception as e:
         logger.error(f"Register GlmMoeDsa model error: {str(e)}")
 
+    # Register TeleChat4 — config and architecture not yet upstream
+    try:
+        from vllm.transformers_utils.config import _CONFIG_REGISTRY
+        from vllm_fl.configs.telechat4 import TeleChat4Config
+        _CONFIG_REGISTRY["telechat4"] = TeleChat4Config
+
+        from vllm.model_executor.models.registry import ModelRegistry
+        ModelRegistry.register_model(
+            "TeleChat4ForCausalLM",
+            "vllm.model_executor.models.deepseek_v2:DeepseekV3ForCausalLM",
+        )
+    except Exception as e:
+        logger.error("Register TeleChat4 model error: %s", str(e))
+
     # Register TeleChat mHC patches for DeepSeekV3-based models
     try:
         from vllm_fl.patches.deepseek_v2_mhc import apply_model_patches as telechat_mhc

@@ -432,7 +432,10 @@ class PlatformFL(Platform):
         # TODO: For PTPU/Sunrise devices, return None
         if cls.device_type == "ptpu":
             return None
-        major, minor = torch.cuda.get_device_capability(device_id)
+        try:
+            major, minor = torch.cuda.get_device_capability(device_id)
+        except RuntimeError:
+            return DeviceCapability(major=0, minor=0)
         return DeviceCapability(major=major, minor=minor)
 
     @classmethod

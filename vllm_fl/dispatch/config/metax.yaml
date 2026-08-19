@@ -28,7 +28,7 @@ strict: false
 op_backends:
   # attention_backend: prioritize vendor (MACA attention), fallback to reference (TritonMLA)
   attention_backend:
-    # - vendor:metax
+    - vendor:metax
     - reference
   # All other ops: prefer FlagGems (Triton), fallback to reference (PyTorch native)
   silu_and_mul:
