@@ -251,14 +251,14 @@ class QSAIndexer(nn.Module):
         metadata: QSAForwardMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        import sys
-        print(f"[DBG-INDEXER] _select starting, q.shape={q.shape}", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#        import sys
+#         print(f"[DBG-INDEXER] _select starting, q.shape={q.shape}", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         from .ops.qsa import qsa_select_paged_tokens
 
-        print(f"[DBG-INDEXER] calling qsa_select_paged_tokens", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-INDEXER] calling qsa_select_paged_tokens", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         result = qsa_select_paged_tokens(
             q,
@@ -272,8 +272,8 @@ class QSAIndexer(nn.Module):
             out,
         )
 
-        print(f"[DBG-INDEXER] qsa_select_paged_tokens done, result.shape={result.shape}", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-INDEXER] qsa_select_paged_tokens done, result.shape={result.shape}", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         return result
 
@@ -285,9 +285,9 @@ class QSAIndexer(nn.Module):
     ) -> torch.Tensor:
         """Return fixed-width request-relative token indices padded with ``-1``."""
 
-        import sys
-        print(f"[DBG-INDEXER] entering forward", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#        import sys
+#         print(f"[DBG-INDEXER] entering forward", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         metadata = self._metadata()
         if metadata is None:
@@ -304,15 +304,15 @@ class QSAIndexer(nn.Module):
         raw_metadata, compressed_metadata = metadata
         num_tokens = raw_metadata.num_actual_tokens
 
-        print(f"[DBG-INDEXER] calling project_qk num_tokens={num_tokens}", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-INDEXER] calling project_qk num_tokens={num_tokens}", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         q, token_k = self.project_qk(
             hidden_states[:num_tokens], positions[..., :num_tokens]
         )
 
-        print(f"[DBG-INDEXER] project_qk done, calling _update_and_compress", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-INDEXER] project_qk done, calling _update_and_compress", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         self._update_and_compress(
             token_k,
@@ -321,13 +321,13 @@ class QSAIndexer(nn.Module):
             compressed_metadata,
         )
 
-        print(f"[DBG-INDEXER] _update_and_compress done, calling _select", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-INDEXER] _update_and_compress done, calling _select", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         result = self._select(q, compressed_metadata, out)
 
-        print(f"[DBG-INDEXER] _select done, returning", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-INDEXER] _select done, returning", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         return result
 

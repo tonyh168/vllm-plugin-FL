@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import math
-import sys
+#import sys
 
 import torch
 
@@ -548,7 +548,7 @@ def qsa_mqa_paged(
     if not q.shape[0] or not columns:
         return logits, visible_blocks
     block_n = 32
-    print(f"[DBG-QSA] qsa_mqa_paged: calling _qsa_mqa_paged_kernel grid={(q.shape[0], triton.cdiv(columns, block_n))}", file=sys.stderr, flush=True)
+#     print(f"[DBG-QSA] qsa_mqa_paged: calling _qsa_mqa_paged_kernel grid={(q.shape[0], triton.cdiv(columns, block_n))}", file=sys.stderr, flush=True)
     _qsa_mqa_paged_kernel[(q.shape[0], triton.cdiv(columns, block_n))](
         q,
         k_cache,
@@ -581,7 +581,7 @@ def qsa_mqa_paged(
         COMPRESS_RATIO=compress_ratio,
         num_warps=4,
     )
-    print(f"[DBG-QSA] qsa_mqa_paged: _qsa_mqa_paged_kernel done", file=sys.stderr, flush=True)
+#     print(f"[DBG-QSA] qsa_mqa_paged: _qsa_mqa_paged_kernel done", file=sys.stderr, flush=True)
     return logits, visible_blocks
 
 
@@ -695,8 +695,8 @@ def qsa_select_paged_tokens(
     for row_start in range(0, rows, rows_per_chunk):
         row_end = min(row_start + rows_per_chunk, rows)
         row_slice = slice(row_start, row_end)
-        import sys
-        print(f"[DBG-QSA] qsa_select: calling qsa_mqa_paged row_start={row_start}", file=sys.stderr, flush=True)
+#        import sys
+#         print(f"[DBG-QSA] qsa_select: calling qsa_mqa_paged row_start={row_start}", file=sys.stderr, flush=True)
         logits, visible_blocks = qsa_mqa_paged(
             q[row_slice],
             k_cache,
@@ -706,9 +706,9 @@ def qsa_select_paged_tokens(
             sequence_lengths,
             compress_ratio,
         )
-        print(f"[DBG-QSA] qsa_select: qsa_mqa_paged done, logits.shape={logits.shape}", file=sys.stderr, flush=True)
+#         print(f"[DBG-QSA] qsa_select: qsa_mqa_paged done, logits.shape={logits.shape}", file=sys.stderr, flush=True)
         if use_native_topk:
-            print(f"[DBG-QSA] qsa_select: calling native_topk", file=sys.stderr, flush=True)
+#             print(f"[DBG-QSA] qsa_select: calling native_topk", file=sys.stderr, flush=True)
             assert blocks_buffer is not None and topk_workspace is not None
             blocks = blocks_buffer[: row_end - row_start]
             native_topk(
@@ -719,9 +719,9 @@ def qsa_select_paged_tokens(
                 block_topk,
                 columns,
             )
-            print(f"[DBG-QSA] qsa_select: native_topk done", file=sys.stderr, flush=True)
+#             print(f"[DBG-QSA] qsa_select: native_topk done", file=sys.stderr, flush=True)
         else:
-            print(f"[DBG-QSA] qsa_select: calling torch.topk", file=sys.stderr, flush=True)
+#             print(f"[DBG-QSA] qsa_select: calling torch.topk", file=sys.stderr, flush=True)
             # Cross-vendor dispatcher entry point: FlagGems or the vendor
             # runtime can provide TopK. Sorting keeps finite visible blocks
             # ahead of the -inf padding consumed by expansion.
@@ -732,9 +732,9 @@ def qsa_select_paged_tokens(
                 largest=True,
                 sorted=True,
             )
-            print(f"[DBG-QSA] qsa_select: torch.topk done", file=sys.stderr, flush=True)
+#             print(f"[DBG-QSA] qsa_select: torch.topk done", file=sys.stderr, flush=True)
             del visible_blocks
-        print(f"[DBG-QSA] qsa_select: calling expand_qsa_block_indices", file=sys.stderr, flush=True)
+#         print(f"[DBG-QSA] qsa_select: calling expand_qsa_block_indices", file=sys.stderr, flush=True)
         expand_qsa_block_indices(
             blocks,
             query_positions[row_slice],
@@ -744,7 +744,7 @@ def qsa_select_paged_tokens(
             token_topk,
             out[row_slice],
         )
-        print(f"[DBG-QSA] qsa_select: expand_qsa_block_indices done", file=sys.stderr, flush=True)
+#         print(f"[DBG-QSA] qsa_select: expand_qsa_block_indices done", file=sys.stderr, flush=True)
     return out
 
 
