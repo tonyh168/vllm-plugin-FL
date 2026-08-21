@@ -154,3 +154,10 @@ def register_model():
         #glm5_model()
     except Exception as e:
         logger.error(f"Register GlmMoeDsa model error: {str(e)}")
+
+    # Register HY4 (HYV4ForCausalLM)
+    try:
+        from vllm_fl.patches.hy_v4_v024 import apply_hy_v4_v024_patches
+        apply_hy_v4_v024_patches()
+    except Exception as e:
+        logger.error(f"Register HY4 model error: {str(e)}")
