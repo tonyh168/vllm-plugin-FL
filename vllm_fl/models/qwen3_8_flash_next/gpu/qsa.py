@@ -315,22 +315,22 @@ class Qwen3_8FlashNextQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         value: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        import sys
-        print(f"[DBG-QSA] layer={self.layer_name} entering _run_qsa", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#        import sys
+#         print(f"[DBG-QSA] layer={self.layer_name} entering _run_qsa", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         metadata = get_forward_context().attn_metadata
-        print(f"[DBG-QSA] layer={self.layer_name} raw metadata type={type(metadata)}", file=sys.stderr, flush=True)
+#         print(f"[DBG-QSA] layer={self.layer_name} raw metadata type={type(metadata)}", file=sys.stderr, flush=True)
         if isinstance(metadata, list):
-            print(f"[DBG-QSA] layer={self.layer_name} metadata is list, len={len(metadata)}", file=sys.stderr, flush=True)
+#             print(f"[DBG-QSA] layer={self.layer_name} metadata is list, len={len(metadata)}", file=sys.stderr, flush=True)
             metadata = metadata[0]
-            print(f"[DBG-QSA] layer={self.layer_name} metadata[0] type={type(metadata)}", file=sys.stderr, flush=True)
+#             print(f"[DBG-QSA] layer={self.layer_name} metadata[0] type={type(metadata)}", file=sys.stderr, flush=True)
         if not isinstance(metadata, dict):
-            print(f"[DBG-QSA] layer={self.layer_name} metadata not dict, type={type(metadata)}, returning zero", file=sys.stderr, flush=True)
+#             print(f"[DBG-QSA] layer={self.layer_name} metadata not dict, type={type(metadata)}, returning zero", file=sys.stderr, flush=True)
             output.zero_()
             return
-        print(f"[DBG-QSA] layer={self.layer_name} metadata keys={list(metadata.keys())[:5]}", file=sys.stderr, flush=True)
-        print(f"[DBG-QSA] layer={self.layer_name} checking key '{self.layer_name}' in metadata: {self.layer_name in metadata}", file=sys.stderr, flush=True)
+#         print(f"[DBG-QSA] layer={self.layer_name} metadata keys={list(metadata.keys())[:5]}", file=sys.stderr, flush=True)
+#         print(f"[DBG-QSA] layer={self.layer_name} checking key '{self.layer_name}' in metadata: {self.layer_name in metadata}", file=sys.stderr, flush=True)
         main_metadata = cast(QSAForwardMetadata, metadata[self.layer_name])
         if self.kv_cache.numel() == 0:
             raise RuntimeError("QSA main K/V cache is not bound")
@@ -343,8 +343,8 @@ class Qwen3_8FlashNextQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
 
-        print(f"[DBG-QSA] layer={self.layer_name} calling indexer num_tokens={num_tokens}", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-QSA] layer={self.layer_name} calling indexer num_tokens={num_tokens}", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         selected = self.indexer(
             hidden_states,
@@ -352,8 +352,8 @@ class Qwen3_8FlashNextQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.topk_indices_buffer[:num_tokens],
         )
 
-        print(f"[DBG-QSA] layer={self.layer_name} indexer done, selected.shape={selected.shape}", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-QSA] layer={self.layer_name} indexer done, selected.shape={selected.shape}", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         if selected.shape != (
             num_tokens,
@@ -368,8 +368,8 @@ class Qwen3_8FlashNextQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
         slot_mapping = main_metadata.slot_mapping[:num_tokens]
 
-        print(f"[DBG-QSA] layer={self.layer_name} storing cache rows", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-QSA] layer={self.layer_name} storing cache rows", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         if num_tokens and has_native_cache_update():
             # Isolated NVIDIA fast path: keep the model-owned QSA backend and
@@ -406,8 +406,8 @@ class Qwen3_8FlashNextQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 value[:num_tokens].reshape(num_tokens, 1, flat_width),
             )
 
-        print(f"[DBG-QSA] layer={self.layer_name} cache stored, calling sparse attention", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-QSA] layer={self.layer_name} cache stored, calling sparse attention", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
         output.zero_()
         if num_tokens:
@@ -422,8 +422,8 @@ class Qwen3_8FlashNextQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 output[:num_tokens],
             )
 
-        print(f"[DBG-QSA] layer={self.layer_name} sparse attention done", file=sys.stderr, flush=True)
-        torch.cuda.synchronize()
+#         print(f"[DBG-QSA] layer={self.layer_name} sparse attention done", file=sys.stderr, flush=True)
+#        torch.cuda.synchronize()
 
     def forward(
         self,
