@@ -40,8 +40,8 @@ op_backends:
     - flagos
     - reference
   topk_softmax:
-    - flagos
     - reference
+    - flagos
 
 # FlagOS operator blacklist
 flagos_blacklist:
