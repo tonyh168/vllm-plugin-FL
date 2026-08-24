@@ -281,15 +281,47 @@ def _patch_int8_moe_for_metax() -> None:
         logger.warning(f"Failed to patch INT8 MoE support: {e}")
 
 
-def _patch_sparse_attn_indexer_for_maca() -> None:
-    """Patch SparseAttnIndexer.forward_native to treat MACA as CUDA.
+def _register_mx_sparse_attn_indexer_op() -> bool:
+    """Load and register the MetaX sparse_attn_indexer op from vllm_metax.
 
-    The upstream check uses `is_cuda()` (nvidia-only) rather than
-    `is_cuda_alike()`. On MACA this falls through to NotImplementedError.
-    We override forward_native to route to forward_cuda when the platform
-    is cuda_alike (which includes MACA).
+    This loads vllm_metax's fp8.py module which registers
+    torch.ops.vllm.mx_sparse_attn_indexer (and bf16 variant). These ops use
+    MetaX's own compiled kernels for indexer cache read/write, MQA logits,
+    and top-k selection.
     """
+    import importlib.util
+    import torch
+
+    if hasattr(torch.ops.vllm, "mx_sparse_attn_indexer"):
+        return True  # already registered
+
+    base_path = "/opt/conda/lib/python3.12/site-packages/vllm_metax/customized/layers/sparse_attn_indexer"
+    for filename, mod_name in [
+        ("fp8.py", "vllm_metax_indexer_fp8"),
+        ("bf16.py", "vllm_metax_indexer_bf16"),
+    ]:
+        path = f"{base_path}/{filename}"
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        if spec is None or spec.loader is None:
+            return False
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    return hasattr(torch.ops.vllm, "mx_sparse_attn_indexer")
+
+
+def _patch_sparse_attn_indexer_for_maca() -> None:
+    """Patch SparseAttnIndexer.forward_native to use MetaX kernels.
+
+    The upstream forward_cuda calls NVIDIA-only C++ ops
+    (indexer_k_quant_and_cache with fp8_e4m3, DeepGEMM fp8_mqa_logits, etc.)
+    that are not available on MACA. MetaX provides equivalent ops via
+    torch.ops.vllm.mx_sparse_attn_indexer which handles bf16 keys natively
+    and uses MACA-compiled kernels for cache, logits, and top-k.
+    """
+    import torch
     from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import _encode_layer_name
+
     if current_platform.is_cuda():
         return  # real NVIDIA, no patch needed
 
@@ -298,15 +330,55 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
             SparseAttnIndexer,
         )
 
+        if not _register_mx_sparse_attn_indexer_op():
+            logger.warning(
+                "Failed to register mx_sparse_attn_indexer op; "
+                "SparseAttnIndexer will not work on MACA"
+            )
+            return
+
         _orig_forward_native = SparseAttnIndexer.forward_native
 
         def _forward_native_maca(self, hidden_states, q_quant, k, weights):
-            if current_platform.is_cuda_alike():
-                return self.forward_cuda(hidden_states, q_quant, k, weights)
-            return _orig_forward_native(self, hidden_states, q_quant, k, weights)
+            if not current_platform.is_cuda_alike():
+                return _orig_forward_native(
+                    self, hidden_states, q_quant, k, weights
+                )
+
+            if isinstance(q_quant, tuple):
+                q_values, q_scale = q_quant
+            else:
+                q_values, q_scale = q_quant, None
+
+            if q_values.dtype in (torch.bfloat16, torch.float16):
+                op = torch.ops.vllm.mx_sparse_attn_indexer_bf16
+            else:
+                op = torch.ops.vllm.mx_sparse_attn_indexer
+
+            return op(
+                hidden_states,
+                _encode_layer_name(self.k_cache.prefix),
+                self.k_cache.kv_cache,
+                q_values,
+                q_scale,
+                k,
+                weights,
+                self.quant_block_size,
+                self.scale_fmt,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_model_len,
+                self.max_total_seq_len,
+                self.topk_indices_buffer,
+                self.skip_k_cache_insert,
+                self.use_fp4_cache,
+            )
 
         SparseAttnIndexer.forward_native = _forward_native_maca
-        logger.info("Patched SparseAttnIndexer.forward_native for MACA platform")
+        logger.info(
+            "Patched SparseAttnIndexer.forward_native to use MetaX "
+            "mx_sparse_attn_indexer op"
+        )
     except Exception as e:
         logger.warning(f"Failed to patch SparseAttnIndexer: {e}")
 
