@@ -389,7 +389,18 @@ class WorkerFL(WorkerBase):
                 f"be less than or equal to the number of visible devices "
                 f"({visible_device_count})."
             )
-        self.device = torch.device(f"{current_platform.device_type}:{self.local_rank}")
+        # --- Ray multi-node: register physical GPU mapping ---
+        assigned_physical_gpu_ids = getattr(
+            self.parallel_config, "assigned_physical_gpu_ids", None
+        )
+        if assigned_physical_gpu_ids is not None:
+            from vllm.platforms.interface import set_assigned_physical_gpu_ids
+            set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+
+        visible_device_index = (
+            current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+        )
+        self.device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
         current_platform.set_device(self.device)
 
         current_platform.check_if_supports_dtype(self.model_config.dtype)
