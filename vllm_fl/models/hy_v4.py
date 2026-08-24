@@ -22,6 +22,9 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
+from vllm.model_executor.layers.fused_moe.layer import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -709,6 +712,14 @@ class HYV4ForCausalLM(
         tp_size = get_tensor_model_parallel_world_size()
         local_heads = self.config.num_attention_heads // tp_size
 
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+        )
+
         for name, loaded_weight in weights:
             if name.startswith("model.mtp_layers."):
                 continue
@@ -779,6 +790,37 @@ class HYV4ForCausalLM(
                     raise ValueError(f"No local HY4 expert accepted {name}")
                 loaded_params.add(mapped)
                 continue
+
+            # Per-expert weight loading (checkpoint format: mlp.experts.{id}.{proj})
+            if "mlp.experts." in name and packed_expert is None:
+                is_expert_weight = False
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    is_expert_weight = True
+                    name_mapped = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+                    if name_mapped not in params_dict:
+                        continue
+                    param = params_dict[name_mapped]
+                    weight_loader = typing.cast(
+                        Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
+                    if success:
+                        loaded_params.add(name_mapped)
+                    break
+                if is_expert_weight:
+                    continue
 
             mapped_stacked = False
             for param_name, weight_name, shard_id in stacked_mapping:

@@ -98,24 +98,22 @@ class HYV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
 def _patch_mla_prefill_for_non_cuda() -> None:
     """Patch MLA prefill backend availability for non-CUDA platforms.
 
-    vLLM's FlashAttnPrefillBackend.is_available() delegates to
-    is_flash_attn_varlen_func_available() which only returns True for CUDA/XPU.
-    MetaX has its own flash_attn library with flash_attn_varlen_func, so we
-    patch the check to recognize it.
+    vLLM's fa_utils.py only defines flash_attn_varlen_func for CUDA/XPU/ROCm
+    at module level. On MetaX the name doesn't exist in fa_utils, which causes
+    downstream imports (mla/prefill/flash_attn.py) to fail with ImportError.
+
+    Fix: inject flash_attn_varlen_func into fa_utils BEFORE patching the
+    availability check, so that subsequent imports find the symbol.
     """
     from vllm.platforms import current_platform
 
     if current_platform.is_cuda() or current_platform.is_xpu():
         return
 
-    # Check if flash_attn is actually available on this platform
+    # Check if MetaX flash_attn is actually available
     try:
-        from flash_attn import flash_attn_varlen_func  # noqa: F401
-        has_flash_attn = True
+        from flash_attn import flash_attn_varlen_func as _fa_varlen
     except ImportError:
-        has_flash_attn = False
-
-    if not has_flash_attn:
         logger.warning(
             "flash_attn not available on this platform, "
             "MLA prefill backend will use torch SDPA fallback"
@@ -123,19 +121,19 @@ def _patch_mla_prefill_for_non_cuda() -> None:
         _patch_mla_prefill_torch_fallback()
         return
 
-    # Patch is_flash_attn_varlen_func_available to return True
     try:
         from vllm.v1.attention.backends import fa_utils
+
+        # Step 1: inject the function into fa_utils so that
+        # `from fa_utils import flash_attn_varlen_func` works
+        fa_utils.flash_attn_varlen_func = _fa_varlen
+
+        # Step 2: patch the availability check
         fa_utils.is_flash_attn_varlen_func_available = lambda: True
 
-        # Also need to ensure flash_attn_varlen_func is loaded in the module
-        from vllm.v1.attention.backends.mla.prefill import flash_attn as mla_fa
-        if mla_fa.flash_attn_varlen_func is None:
-            from flash_attn import flash_attn_varlen_func as _fa_varlen
-            mla_fa.flash_attn_varlen_func = _fa_varlen
-
         logger.info(
-            "Patched is_flash_attn_varlen_func_available() for MetaX platform"
+            "Patched fa_utils: injected flash_attn_varlen_func and "
+            "is_flash_attn_varlen_func_available() for MetaX platform"
         )
     except Exception as e:
         logger.warning(f"Failed to patch flash_attn availability: {e}, "
@@ -248,8 +246,6 @@ def _patch_int8_moe_for_metax() -> None:
             kInt8StaticChannelSym,
         )
 
-        _orig_supports_quant_scheme = TritonExperts._supports_quant_scheme.__func__
-
         @staticmethod
         def _patched_supports_quant_scheme(
             weight_key: "QuantKey | None",
@@ -285,6 +281,36 @@ def _patch_int8_moe_for_metax() -> None:
         logger.warning(f"Failed to patch INT8 MoE support: {e}")
 
 
+def _patch_sparse_attn_indexer_for_maca() -> None:
+    """Patch SparseAttnIndexer.forward_native to treat MACA as CUDA.
+
+    The upstream check uses `is_cuda()` (nvidia-only) rather than
+    `is_cuda_alike()`. On MACA this falls through to NotImplementedError.
+    We override forward_native to route to forward_cuda when the platform
+    is cuda_alike (which includes MACA).
+    """
+    from vllm.platforms import current_platform
+    if current_platform.is_cuda():
+        return  # real NVIDIA, no patch needed
+
+    try:
+        from vllm.model_executor.layers.sparse_attn_indexer import (
+            SparseAttnIndexer,
+        )
+
+        _orig_forward_native = SparseAttnIndexer.forward_native
+
+        def _forward_native_maca(self, hidden_states, q_quant, k, weights):
+            if current_platform.is_cuda_alike():
+                return self.forward_cuda(hidden_states, q_quant, k, weights)
+            return _orig_forward_native(self, hidden_states, q_quant, k, weights)
+
+        SparseAttnIndexer.forward_native = _forward_native_maca
+        logger.info("Patched SparseAttnIndexer.forward_native for MACA platform")
+    except Exception as e:
+        logger.warning(f"Failed to patch SparseAttnIndexer: {e}")
+
+
 def apply_hy_v4_v024_patches() -> bool:
     """Register the HY4 runtime components required by vLLM 0.24.x."""
     if not is_vllm_024():
@@ -317,6 +343,9 @@ def apply_hy_v4_v024_patches() -> bool:
 
     # Patch INT8 MoE support for MetaX (cuda_alike but not nvidia)
     _patch_int8_moe_for_metax()
+
+    # Patch SparseAttnIndexer to work on MACA (is_cuda_alike but not is_cuda)
+    _patch_sparse_attn_indexer_for_maca()
 
     logger.info("Installed HY4 runtime compatibility for vLLM 0.24")
     return True
