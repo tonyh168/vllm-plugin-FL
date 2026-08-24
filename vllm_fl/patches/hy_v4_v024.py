@@ -365,17 +365,17 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                     self, hidden_states, q_quant, k, weights
                 )
 
+            # MACA only has bf16_mqa_logits — always use bf16 op
             if isinstance(q_quant, tuple):
                 q_values, q_scale = q_quant
             else:
                 q_values, q_scale = q_quant, None
 
-            if q_values.dtype in (torch.bfloat16, torch.float16):
-                op = torch.ops.vllm.mx_sparse_attn_indexer_bf16
-            else:
-                op = torch.ops.vllm.mx_sparse_attn_indexer
+            if q_values.dtype not in (torch.bfloat16, torch.float16):
+                q_values = q_values.to(torch.bfloat16)
+                q_scale = None
 
-            return op(
+            return torch.ops.vllm.mx_sparse_attn_indexer_bf16(
                 hidden_states,
                 _encode_layer_name(self.k_cache.prefix),
                 self.k_cache.kv_cache,
