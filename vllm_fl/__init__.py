@@ -154,3 +154,32 @@ def register_model():
         #glm5_model()
     except Exception as e:
         logger.error(f"Register GlmMoeDsa model error: {str(e)}")
+
+    # Register Qwen3.8-Flash-Next / Qwen4Exp model
+    try:
+        from vllm.model_executor.models.registry import ModelRegistry
+        from vllm.transformers_utils.config import _CONFIG_REGISTRY
+        from vllm_fl.models.qwen3_8_flash_next.config import (
+            Qwen3_8FlashNextConfig,
+        )
+        _CONFIG_REGISTRY["qwen3_8_flash_next"] = Qwen3_8FlashNextConfig
+        _CONFIG_REGISTRY["qwen4_exp"] = Qwen3_8FlashNextConfig
+
+        ModelRegistry.register_model(
+            "Qwen3_8FlashNextForCausalLM",
+            "vllm_fl.models.qwen3_8_flash_next:Qwen3_8FlashNextForCausalLM"
+        )
+        ModelRegistry.register_model(
+            "Qwen3_8FlashNextForConditionalGeneration",
+            "vllm_fl.models.qwen3_8_flash_next:Qwen3_8FlashNextForConditionalGeneration"
+        )
+        ModelRegistry.register_model(
+            "Qwen4ExpForCausalLM",
+            "vllm_fl.models.qwen3_8_flash_next:Qwen3_8FlashNextForCausalLM"
+        )
+        ModelRegistry.register_model(
+            "Qwen4ExpForConditionalGeneration",
+            "vllm_fl.models.qwen3_8_flash_next:Qwen3_8FlashNextForConditionalGeneration"
+        )
+    except Exception as e:
+        logger.error(f"Register Qwen3_8FlashNext model error: {str(e)}")
