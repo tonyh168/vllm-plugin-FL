@@ -405,11 +405,13 @@ class WorkerFL(WorkerBase):
             if current_platform.torch_device_fn.is_available()
             else 0
         )
-        logger.info(
-            "init_device: rank=%d local_rank=%d visible_device_index=%d "
-            "device_count=%d assigned_physical_gpu_ids=%s",
-            self.rank, self.local_rank, visible_device_index,
-            device_count, assigned_physical_gpu_ids,
+        import sys
+        print(
+            f"[DEBUG init_device] rank={self.rank} local_rank={self.local_rank} "
+            f"visible_device_index={visible_device_index} "
+            f"device_count={device_count} "
+            f"assigned_physical_gpu_ids={assigned_physical_gpu_ids}",
+            file=sys.stderr, flush=True,
         )
         self.device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
         current_platform.set_device(self.device)
