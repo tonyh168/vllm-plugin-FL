@@ -42,6 +42,10 @@ op_backends:
   topk_softmax:
     - flagos
     - reference
+  invoke_fused_moe_triton_kernel:
+    - vendor:metax
+    - flagos
+    - reference
 
 # FlagOS operator blacklist
 flagos_blacklist:
