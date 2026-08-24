@@ -51,6 +51,7 @@ op_backends:
 flagos_blacklist:
   - masked_fill
   - masked_fill_
+  - layer_norm
 
 # OOT (Out-of-Tree) operator blacklist
 oot_blacklist:
