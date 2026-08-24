@@ -290,10 +290,30 @@ def _register_mx_sparse_attn_indexer_op() -> bool:
     and top-k selection.
     """
     import importlib.util
+    import sys
     import torch
 
     if hasattr(torch.ops.vllm, "mx_sparse_attn_indexer"):
         return True  # already registered
+
+    # The MetaX fp8.py imports DeepseekV32IndexerMetadata from
+    # vllm_metax.v1.attention.backends.mla.indexer, but in FL plugin mode
+    # the actual attn_metadata uses the class from the upstream vllm module.
+    # We alias the metax module to the upstream one so isinstance checks pass.
+    upstream_indexer_mod = "vllm.v1.attention.backends.mla.indexer"
+    metax_indexer_mod = "vllm_metax.v1.attention.backends.mla.indexer"
+    if upstream_indexer_mod in sys.modules and metax_indexer_mod not in sys.modules:
+        sys.modules[metax_indexer_mod] = sys.modules[upstream_indexer_mod]
+        # Ensure parent packages exist in sys.modules for the alias to work
+        for parent in [
+            "vllm_metax.v1",
+            "vllm_metax.v1.attention",
+            "vllm_metax.v1.attention.backends",
+            "vllm_metax.v1.attention.backends.mla",
+        ]:
+            if parent not in sys.modules:
+                import types
+                sys.modules[parent] = types.ModuleType(parent)
 
     base_path = "/opt/conda/lib/python3.12/site-packages/vllm_metax/customized/layers/sparse_attn_indexer"
     for filename, mod_name in [
