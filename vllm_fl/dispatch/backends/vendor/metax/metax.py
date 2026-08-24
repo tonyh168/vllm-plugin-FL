@@ -27,6 +27,10 @@ def register_attention_backends():
         class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.mla.flashmla.MacaFlashMLABackend",
     )
     register_backend(
+        AttentionBackendEnum.FLASHMLA_SPARSE,
+        class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.mla.flashmla_sparse.MacaFlashMLASparseBackend",
+    )
+    register_backend(
         AttentionBackendEnum.FLASH_ATTN,
         class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.flash_attn.MacaFlashAttentionBackend",
     )

@@ -403,6 +403,66 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
         logger.warning(f"Failed to patch SparseAttnIndexer: {e}")
 
 
+def _patch_flashmla_sparse_for_metax() -> None:
+    """Patch FlashMLA sparse decode to use MetaX kernels instead of vllm._flashmla_C.
+
+    The native FLASHMLA_SPARSE backend requires NVIDIA's compiled _flashmla_C
+    extension. MetaX has its own flash_mla library with sparse support. This
+    patch redirects the kernel calls and fixes capability checks so both the
+    registry-based path and HYV4FlashMLASparseBackend work on MACA.
+    """
+    from vllm.platforms import current_platform
+
+    if current_platform.is_cuda():
+        return  # real NVIDIA, no patch needed
+
+    try:
+        from vllm_fl.dispatch.backends.vendor.metax.impl.attention.ops.flashmla import (
+            flash_mla_sparse_prefill,
+        )
+
+        def _maca_flash_mla_sparse_fwd(
+            q, kv, indices, sm_scale, topk_length=None, attn_sink=None
+        ):
+            """Wrapper matching the native flash_mla_sparse_fwd signature."""
+            return flash_mla_sparse_prefill(q, kv, indices, sm_scale)
+
+        # Patch the ops module so any code importing from there gets MetaX version
+        import vllm.v1.attention.ops.flashmla as flashmla_ops
+        flashmla_ops.flash_mla_sparse_fwd = _maca_flash_mla_sparse_fwd
+
+        # Patch the already-imported reference in the sparse backend module
+        import vllm.v1.attention.backends.mla.flashmla_sparse as sparse_mod
+        sparse_mod.flash_mla_sparse_fwd = _maca_flash_mla_sparse_fwd
+
+        # Patch supports_compute_capability so HYV4FlashMLASparseBackend passes
+        # validation (it inherits from the native FlashMLASparseBackend)
+        from vllm.v1.attention.backends.mla.flashmla_sparse import (
+            FlashMLASparseBackend,
+        )
+
+        @classmethod  # type: ignore[misc]
+        def _maca_supports_capability(cls, capability) -> bool:
+            return True
+
+        FlashMLASparseBackend.supports_compute_capability = (
+            _maca_supports_capability
+        )
+
+        # Also patch the hy_v4_flashmla_sparse module's imported symbols
+        try:
+            from vllm_fl.models import hy_v4_flashmla_sparse as hy4_sparse
+            hy4_sparse.flash_mla_sparse_fwd = _maca_flash_mla_sparse_fwd
+        except (ImportError, AttributeError):
+            pass
+
+        logger.info(
+            "Patched FlashMLA sparse decode to use MetaX flash_mla kernels"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to patch FlashMLA sparse for MetaX: {e}")
+
+
 def apply_hy_v4_v024_patches() -> bool:
     """Register the HY4 runtime components required by vLLM 0.24.x."""
     if not is_vllm_024():
@@ -438,6 +498,9 @@ def apply_hy_v4_v024_patches() -> bool:
 
     # Patch SparseAttnIndexer to work on MACA (is_cuda_alike but not is_cuda)
     _patch_sparse_attn_indexer_for_maca()
+
+    # Patch FlashMLA sparse decode to use MetaX kernels
+    _patch_flashmla_sparse_for_metax()
 
     logger.info("Installed HY4 runtime compatibility for vLLM 0.24")
     return True
