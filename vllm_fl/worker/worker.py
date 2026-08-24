@@ -400,6 +400,17 @@ class WorkerFL(WorkerBase):
         visible_device_index = (
             current_platform.logical_device_id_to_visible_device_id(self.local_rank)
         )
+        device_count = (
+            current_platform.torch_device_fn.device_count()
+            if current_platform.torch_device_fn.is_available()
+            else 0
+        )
+        logger.info(
+            "init_device: rank=%d local_rank=%d visible_device_index=%d "
+            "device_count=%d assigned_physical_gpu_ids=%s",
+            self.rank, self.local_rank, visible_device_index,
+            device_count, assigned_physical_gpu_ids,
+        )
         self.device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
         current_platform.set_device(self.device)
 
