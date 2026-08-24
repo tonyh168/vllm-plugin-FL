@@ -12,7 +12,10 @@ from typing import Optional, Union
 
 import torch
 
+from vllm.logger import init_logger
 from vllm_fl.dispatch.backends.base import Backend
+
+logger = init_logger(__name__)
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
@@ -174,6 +177,8 @@ class MacaBackend(Backend):
             topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
         )
 
+    _FUSED_MOE_VERSION = "v2_int8_torch"
+
     def invoke_fused_moe_triton_kernel(
         self,
         A,
@@ -197,6 +202,10 @@ class MacaBackend(Backend):
         block_shape=None,
         B_bias=None,
     ):
+        logger.info_once(
+            "MetaX fused_moe dispatch [%s]: use_int8_w8a8=%s, A.dtype=%s, B.dtype=%s",
+            self._FUSED_MOE_VERSION, use_int8_w8a8, A.dtype, B.dtype,
+        )
         if use_int8_w8a8:
             from .impl.fused_moe_torch import invoke_fused_moe_torch_int8
 
