@@ -54,9 +54,13 @@ def FusedMoEFL(*args, **kwargs) -> MoERunner:
     #    _fused_moe_pkg.FusedMoE with FusedMoEFL.
     runner: MoERunner = _OrigFusedMoE(*args, **kwargs)
 
-    # 2. Replace quant_method with FL version.
-    fl_quant_method = UnquantizedFusedMoEMethodFL(runner.moe_config)
-    runner._replace_quant_method(fl_quant_method)
+    # 2. Replace quant_method with FL version ONLY for unquantized MoE.
+    #    Quantized methods (INT8 W8A8, FP8, etc.) must keep their original
+    #    quant_method so that use_int8_w8a8/use_fp8_w8a8 flags propagate
+    #    correctly to the dispatch layer.
+    if isinstance(runner._quant_method, UnquantizedFusedMoEMethod):
+        fl_quant_method = UnquantizedFusedMoEMethodFL(runner.moe_config)
+        runner._replace_quant_method(fl_quant_method)
 
     # 3. Replace router _compute_routing with FL version via monkey-patch.
     #    replace_router_with_fl() patches the class method so the router
