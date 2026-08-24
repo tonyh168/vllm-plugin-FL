@@ -197,6 +197,30 @@ class MacaBackend(Backend):
         block_shape=None,
         B_bias=None,
     ):
+        if use_int8_w8a8:
+            from .impl.fused_moe_torch import invoke_fused_moe_torch_int8
+
+            invoke_fused_moe_torch_int8(
+                A,
+                B,
+                C,
+                A_scale,
+                B_scale,
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                mul_routed_weight,
+                top_k,
+                config,
+                compute_type,
+                use_int8_w8a8=use_int8_w8a8,
+                per_channel_quant=per_channel_quant,
+                block_shape=block_shape,
+                B_bias=B_bias,
+            )
+            return
+
         from .impl.fused_moe import invoke_fused_moe_triton_kernel_maca
 
         invoke_fused_moe_triton_kernel_maca(
