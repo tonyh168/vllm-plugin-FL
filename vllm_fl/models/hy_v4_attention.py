@@ -33,7 +33,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
+    per_token_group_quant_fp8 as _per_token_group_quant_fp8_orig,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
@@ -46,6 +46,20 @@ logger = init_logger(__name__)
 
 _SPARSE_LAYER_TYPES = ("sparse_attention", "sparse", "deepseek_sparse_attention")
 _WEIGHT_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
+
+
+def per_token_group_quant_fp8(x, *args, **kwargs):
+    """MACA-safe wrapper for per_token_group_quant_fp8.
+
+    The vLLM implementation tries a _C CUDA op first (when x is contiguous),
+    but that op has no MACA backend. We make x non-contiguous via pad+slice
+    so it skips the _C branch and falls through to the triton kernel.
+    The triton path only requires stride(-1)==1 which the slice preserves.
+    """
+    if x.is_contiguous() and x.ndim >= 2:
+        padded = torch.nn.functional.pad(x, (0, 1))
+        x = padded[..., :-1]  # same data, non-contiguous (stride(-2) = N+1)
+    return _per_token_group_quant_fp8_orig(x, *args, **kwargs)
 
 
 def compute_skip_topk_layers(config: PretrainedConfig) -> set[int]:
