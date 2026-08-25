@@ -72,6 +72,16 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
     elif current_platform.is_cpu():
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
+    else:
+        # PlatformFL is intentionally OOT.  Unknown CUDA-alike vendors (for
+        # example Hygon) must not fall through to an unbound local or inherit
+        # NVIDIA-only FlashInfer candidates.  Triton is the portable fallback
+        # and keeps the backend choice fail-safe until a vendor adds a native
+        # expert implementation.
+        _AVAILABLE_BACKENDS = [
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+        ]
     return _AVAILABLE_BACKENDS
 
 ## Adopt from select_unquantized_moe_backend
@@ -89,7 +99,25 @@ def select_unquantized_moe_backend_oot(moe_config: FusedMoEConfig,
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 
-    if current_platform.is_out_of_tree() and use_flaggems():
+    # Keep the FlagGems Triton fast path as the default for OOT platforms,
+    # while still honoring an explicit backend or ROCm AITER opt-in.  Without
+    # this guard, the OOT branch made ``moe_backend=aiter`` and
+    # VLLM_ROCM_USE_AITER[_MOE]=1 unreachable on AMD.
+    rocm_aiter_requested = (
+        current_platform.is_rocm()
+        and (
+            envs.is_set("VLLM_ROCM_USE_AITER")
+            or envs.is_set("VLLM_ROCM_USE_AITER_MOE")
+        )
+        and envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_MOE
+    )
+    if (
+        current_platform.is_out_of_tree()
+        and use_flaggems()
+        and moe_config.moe_backend == "auto"
+        and not rocm_aiter_requested
+    ):
         return UnquantizedMoeBackend.TRITON, TritonExpertsFL
 
     if moe_config.is_lora_enabled:

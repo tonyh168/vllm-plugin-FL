@@ -138,6 +138,14 @@ def register_router():
 
 def register_model():
     """Register FL-specific models not yet upstream."""
+    # Model and metadata registration must run in every spawned inspection and
+    # worker process. The hooks are idempotent and do not overwrite vLLM files.
+    from vllm_fl.patches.qwen3_8_flash_next import (
+        apply_qwen3_8_flash_next_patches,
+    )
+
+    apply_qwen3_8_flash_next_patches()
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them
