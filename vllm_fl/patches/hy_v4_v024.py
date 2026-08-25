@@ -408,19 +408,30 @@ def _patch_bf16_paged_mqa_logits_debug() -> None:
     # FL plugin mode (vllm_metax.v1.attention.ops missing). Patch the already
     # loaded module object directly from sys.modules; if it isn't loaded yet,
     # the source-module patch above still covers late imports.
+    # Patch only the known modules that hold the symbol by value. Do NOT scan
+    # all of sys.modules with getattr — some vLLM lazy modules define a custom
+    # __getattr__(name) that raises when probed for an unknown attr, which would
+    # crash this whole patch (and take the indexer forward_native patch with it).
     import sys
     patched_here = False
-    for _name, _m in list(sys.modules.items()):
+    # bf16.py is exec'd under the custom name "vllm_metax_indexer_bf16" by
+    # _register_mx_sparse_attn_indexer_op (spec_from_file_location).
+    for _name in ("vllm_metax_indexer_bf16",
+                  "vllm_metax.customized.layers.sparse_attn_indexer.bf16"):
+        _m = sys.modules.get(_name)
         if _m is None:
             continue
-        if getattr(_m, "bf16_paged_mqa_logits", None) is _orig:
-            _m.bf16_paged_mqa_logits = _wrapped
-            patched_here = True
-            logger.info("[hy4-paged-mqa] patched symbol in module %s", _name)
+        try:
+            if getattr(_m, "bf16_paged_mqa_logits", None) is _orig:
+                _m.bf16_paged_mqa_logits = _wrapped
+                patched_here = True
+                logger.info("[hy4-paged-mqa] patched symbol in module %s", _name)
+        except Exception as pe:
+            logger.warning("[hy4-paged-mqa] probe of %s failed: %s", _name, pe)
     if not patched_here:
         logger.info(
-            "[hy4-paged-mqa] bf16 module not loaded yet; source-module patch "
-            "on deep_gemm will cover it"
+            "[hy4-paged-mqa] bf16 module symbol not patched here; source-module "
+            "patch on deep_gemm covers imports resolved after this point"
         )
     logger.info("[hy4-paged-mqa] wrapped bf16_paged_mqa_logits for one-shot debug")
 
@@ -529,10 +540,16 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
             "Patched SparseAttnIndexer.forward_native to use MetaX "
             "mx_sparse_attn_indexer op"
         )
-        # Instrument the decode paged-logits kernel to catch the ATU Fault.
-        _patch_bf16_paged_mqa_logits_debug()
     except Exception as e:
         logger.warning(f"Failed to patch SparseAttnIndexer: {e}")
+
+    # Instrument the decode paged-logits kernel to catch the ATU Fault.
+    # Isolated in its own try so a debug-hook failure can never break the
+    # (already applied) forward_native patch above.
+    try:
+        _patch_bf16_paged_mqa_logits_debug()
+    except Exception as e:
+        logger.warning(f"[hy4-paged-mqa] debug hook install failed (ignored): {e}")
 
 
 def _patch_flashmla_sparse_for_metax() -> None:
