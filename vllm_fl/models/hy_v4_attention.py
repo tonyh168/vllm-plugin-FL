@@ -211,6 +211,13 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
         )
+        logger.info(
+            "[hy4-indexer] %s: k_cache layout head_dim=%s dtype=%s "
+            "(index_head_dim=%s, is_cuda=%s). bf16 kernel needs "
+            "cache_head_dim==index_head_dim; fp8 path adds +4 for packed scale.",
+            prefix, k_cache_head_dim, k_cache_dtype, self.head_dim,
+            current_platform.is_cuda(),
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.prefix = prefix
 

@@ -375,6 +375,40 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                 q_values = q_values.to(torch.bfloat16)
                 q_scale = None
 
+            # One-shot debug: dump the exact shapes/dtypes handed to the bf16
+            # MQA-logits kernel. deep_gemm/bf16_attention.py:366 asserts
+            # ``kv_heads == 1 and kv_dim == head_dim``; the kv_cache last dim
+            # (kv_dim) must equal self.head_dim (no packed fp8 scale). This log
+            # tells us at a glance whether the cache layout fix took effect and,
+            # if the assert still fires, which half fails. Gated on a per-op
+            # class attr so it prints once (prefill + decode) not every step.
+            if not getattr(SparseAttnIndexer, "_mx_bf16_shape_logged", False):
+                kv = self.k_cache.kv_cache
+                logger.info(
+                    "[hy4-indexer-bf16] q_values=%s/%s k=%s/%s kv_cache=%s/%s "
+                    "head_dim=%s quant_block_size=%s scale_fmt=%s topk=%s "
+                    "q_scale=%s skip_k_cache_insert=%s use_fp4_cache=%s | "
+                    "expect kv_cache last dim == head_dim (%s)",
+                    tuple(q_values.shape), q_values.dtype,
+                    tuple(k.shape) if k is not None else None,
+                    k.dtype if k is not None else None,
+                    tuple(kv.shape), kv.dtype,
+                    self.head_dim, self.quant_block_size, self.scale_fmt,
+                    self.topk_tokens,
+                    None if q_scale is None else (tuple(q_scale.shape), q_scale.dtype),
+                    self.skip_k_cache_insert, self.use_fp4_cache,
+                    self.head_dim,
+                )
+                if kv.ndim >= 1 and kv.shape[-1] != self.head_dim:
+                    logger.warning(
+                        "[hy4-indexer-bf16] kv_cache last dim %s != head_dim %s "
+                        "-> bf16_paged_mqa_logits assert kv_dim==head_dim WILL "
+                        "fail. Cache built with fp8-packed width? Check "
+                        "hy_v4_attention.py Indexer k_cache layout.",
+                        kv.shape[-1], self.head_dim,
+                    )
+                SparseAttnIndexer._mx_bf16_shape_logged = True
+
             return torch.ops.vllm.mx_sparse_attn_indexer_bf16(
                 hidden_states,
                 _encode_layer_name(self.k_cache.prefix),
