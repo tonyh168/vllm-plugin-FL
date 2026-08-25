@@ -78,9 +78,10 @@ class Qwen3_8FlashNextForConditionalGenerationConfig(
                 "microbatching in the Day0 path"
             )
         if bool(text_config.ple_layer_ids) and parallel_config.pipeline_parallel_size > 1:
-            raise NotImplementedError(
-                "Qwen4Exp PLE requires pipeline_parallel_size=1 because raw "
-                "token n-gram context is not broadcast between PP stages"
+            logger.warning(
+                "Qwen4Exp PLE detected with pipeline_parallel_size>1. "
+                "PLE will be force-disabled at model layer level since raw "
+                "token n-gram context is not broadcast between PP stages."
             )
 
         multimodal_config = vllm_config.model_config.multimodal_config

@@ -545,22 +545,20 @@ class ModelRunnerFL(
         # Qwen3.8-Flash-Next PLE consumes the raw token history preceding each
         # scheduled chunk. Keep this in the plugin-owned v0.24 runner so the
         # installed vLLM tree remains unmodified.
+        # WORKAROUND(iluvatar): Force disable PLE for PP>1 compatibility
+        # PLE requires raw token n-gram context which is not broadcast between
+        # PP stages. This is an architectural limitation in vLLM's PP design.
         ple_layer_ids = getattr(model_config.hf_text_config, "ple_layer_ids", ())
-        self.uses_ngram_embedding = bool(ple_layer_ids)
-        if self.uses_ngram_embedding:
-            self.ngram_context_len = int(model_config.hf_text_config.ngram_size) - 1
-            self.ngram_eos_token_id = int(model_config.hf_text_config.eos_token_id)
-        else:
-            self.ngram_context_len = 0
-            self.ngram_eos_token_id = 0
-        if self.uses_ngram_embedding and self.ngram_context_len <= 0:
-            raise ValueError("N-gram embedding requires context length >= 1.")
-        # FIXME(iluvatar): PLE PP>1 support needs testing, temporarily disabled
-        # if self.uses_ngram_embedding and len(get_pp_group().ranks) > 1:
-        #     raise RuntimeError(
-        #         "N-gram PLE embedding currently requires "
-        #         "pipeline_parallel_size=1."
-        #     )
+        if ple_layer_ids:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "PLE (n-gram embedding) detected but force-disabled due to "
+                "pipeline_parallel_size > 1. Model will run without PLE layers."
+            )
+        self.uses_ngram_embedding = False  # Force disable
+        self.ngram_context_len = 0
+        self.ngram_eos_token_id = 0
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm

@@ -303,13 +303,14 @@ def patch_torch_inductor_for_iluvatar() -> None:
         # In flagtree triton 3.6.x, the registered backend name is 'iluvatar'
         # but its supports_target() checks backend == 'corex', so we must
         # discover the correct probe string at runtime.
+        # UPDATE: triton 3.2.x iluvatar backend actually checks backend == 'cuda'
         _target = None
         try:
             from triton.backends.compiler import GPUTarget as _GPUTarget
-            for _probe in ('corex', 'iluvatar') + tuple(_registered):
+            for _probe in ('cuda', 'corex', 'iluvatar') + tuple(_registered):
                 try:
                     _t = object.__new__(_GPUTarget)
-                    _GPUTarget.__init__(_t, _probe, 90, False)
+                    _GPUTarget.__init__(_t, _probe, 90, 32)
                     for _bname in _registered:
                         if _tb.backends[_bname].compiler.supports_target(_t):
                             _target = _probe
@@ -321,7 +322,7 @@ def patch_torch_inductor_for_iluvatar() -> None:
         except Exception:
             pass
         if not _target:
-            _target = 'corex'  # safe default for all known flagtree versions
+            _target = 'cuda'  # safe default: iluvatar backend supports 'cuda' target
     except Exception:
         logger.debug('patch_torch_inductor_for_iluvatar: cannot inspect triton backends, skipping')
         return

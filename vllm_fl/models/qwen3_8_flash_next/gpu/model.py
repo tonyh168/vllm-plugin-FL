@@ -674,10 +674,15 @@ class Qwen3_8FlashNextModel(nn.Module):
 
         def get_layer(prefix: str) -> Qwen3_8FlashNextDecoderLayer:
             layer_idx = extract_layer_index(prefix)
+            # WORKAROUND(iluvatar): Force disable PLE for PP>1 compatibility
+            # PLE requires raw token n-gram context which is not broadcast
+            # between PP stages in vLLM's current architecture.
+            force_disable_ple = len(get_pp_group().ranks) > 1
             return Qwen3_8FlashNextDecoderLayer(
                 vllm_config,
                 layer_type=config.layer_types[layer_idx],
                 prefix=prefix,
+                force_disable_ple=force_disable_ple,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -818,6 +823,8 @@ class Qwen3_8FlashNextModel(nn.Module):
         ]
         if not get_pp_group().is_last_rank:
             skip_substrs.append("hyper_connection_mixer")
+        if len(get_pp_group().ranks) > 1:
+            skip_substrs.append(".ple")
         mapper = self.hf_to_vllm_mapper
         loader_cls = AutoWeightsLoader
         legacy_loaded: set[str] = set()
