@@ -72,7 +72,10 @@ class PlatformFL(Platform):
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
         if self.vendor_name == "iluvatar":
-            return False
+            # BI-V150 uses corex (CUDA-compatible stack), treat as cuda_alike
+            # so vllm internal checks (bind_kv_cache, pooler stream, quant
+            # dispatch) work correctly.
+            return True
         if self.device_type == "musa":
             return True
         if self.vendor_name == "hygon":
