@@ -401,13 +401,27 @@ def _patch_bf16_paged_mqa_logits_debug() -> None:
 
     _wrapped._hy4_debug_wrapped = True
     _mx_dg.bf16_paged_mqa_logits = _wrapped
-    # The bf16 indexer module imported the symbol by value; patch it there too.
-    try:
-        import vllm_metax.customized.layers.sparse_attn_indexer.bf16 as _mx_bf16
-        if hasattr(_mx_bf16, "bf16_paged_mqa_logits"):
-            _mx_bf16.bf16_paged_mqa_logits = _wrapped
-    except Exception as e:
-        logger.warning(f"[hy4-paged-mqa] could not patch bf16 module symbol: {e}")
+    # bf16.py imported the symbol by value, and it is loaded under the custom
+    # module name "vllm_metax_indexer_bf16" (see _register_mx_sparse_attn_indexer_op,
+    # which execs it via spec_from_file_location). Do NOT `import` the real
+    # package path — that triggers bf16.py's transitive imports which fail in
+    # FL plugin mode (vllm_metax.v1.attention.ops missing). Patch the already
+    # loaded module object directly from sys.modules; if it isn't loaded yet,
+    # the source-module patch above still covers late imports.
+    import sys
+    patched_here = False
+    for _name, _m in list(sys.modules.items()):
+        if _m is None:
+            continue
+        if getattr(_m, "bf16_paged_mqa_logits", None) is _orig:
+            _m.bf16_paged_mqa_logits = _wrapped
+            patched_here = True
+            logger.info("[hy4-paged-mqa] patched symbol in module %s", _name)
+    if not patched_here:
+        logger.info(
+            "[hy4-paged-mqa] bf16 module not loaded yet; source-module patch "
+            "on deep_gemm will cover it"
+        )
     logger.info("[hy4-paged-mqa] wrapped bf16_paged_mqa_logits for one-shot debug")
 
 
