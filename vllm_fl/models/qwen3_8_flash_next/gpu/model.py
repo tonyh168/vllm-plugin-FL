@@ -785,19 +785,14 @@ class Qwen3_8FlashNextModel(nn.Module):
                 )
                 hidden_states = hidden_states + deepstack_embed
 
-        import sys as _sys
-        print(f"[DBG-FWD] layers done, is_last_rank={get_pp_group().is_last_rank}, hidden_states.shape={hidden_states.shape}", file=_sys.stderr, flush=True)
-
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
-        print(f"[DBG-FWD] entering hyper_connection_mixer", file=_sys.stderr, flush=True)
         if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states)
         assert self.hyper_connection_mixer is not None
         hidden_states, _ = self.hyper_connection_mixer.mix(hidden_states)
-        print(f"[DBG-FWD] hyper_connection_mixer done", file=_sys.stderr, flush=True)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
