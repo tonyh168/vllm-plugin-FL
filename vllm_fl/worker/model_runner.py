@@ -6027,6 +6027,17 @@ class ModelRunnerFL(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
+            # For models needing query_start_loc (e.g., Qwen-Next ngram PLE),
+            # construct a dummy query_start_loc tensor for profiling.
+            if is_profile:
+                query_start_loc_np = np.zeros(num_reqs_padded + 1, dtype=np.int32)
+                query_start_loc_np[1:num_reqs + 1] = np.cumsum(num_scheduled_tokens)
+                query_start_loc_np[num_reqs + 1:] = query_start_loc_np[num_reqs]
+                query_start_loc = torch.from_numpy(query_start_loc_np).to(self.device)
+                model_kwargs["query_start_loc"] = query_start_loc
+                # Dummy ngram_context (empty dict) for profiling
+                model_kwargs["ngram_context"] = {}
+
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
                 set_forward_context(
