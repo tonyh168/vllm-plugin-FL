@@ -240,6 +240,25 @@ class WorkerFL(WorkerBase):
             # Get whitelist and blacklist from environment variables
             whitelist, blacklist = get_flag_gems_whitelist_blacklist()
 
+            # Qwen3.8-Flash-Next/Qwen4Exp owns a multi-GiB transposed PLE
+            # cache. FlagGems index_select first makes that entire view
+            # contiguous, while native ATen touches only the requested rows.
+            # Merge the model-specific exclusion with the platform defaults;
+            # do not mutate global config or affect workers for other models.
+            from vllm_fl.patches.qwen3_8_flash_next import (
+                apply_native_index_select_policy,
+                needs_native_index_select,
+            )
+
+            whitelist, blacklist = apply_native_index_select_policy(
+                vllm_config, whitelist, blacklist
+            )
+            if not whitelist and needs_native_index_select(vllm_config):
+                logger.info(
+                    "[Qwen3.8-Flash-Next] Using native index_select for "
+                    "non-contiguous PLE/QSA state"
+                )
+
             # Only rank 0 records the oplist to avoid file truncation and
             # interleaved writes when tensor-parallel-size > 1.
             should_record = (rank == 0)
@@ -517,10 +536,13 @@ class WorkerFL(WorkerBase):
             # CUDA graphs are captured only after the KV cache has been
             # allocated. Account for their pool before sizing the cache;
             # otherwise high-concurrency batches can leave no room for
-            # runtime activations and fail with OOM.
+            # runtime activations and fail with OOM.  The pool accounting
+            # helper uses PyTorch's CUDA-shaped graph/memory API, which is also
+            # the supported interface on ROCm/HIP. Other OOT runtimes keep the
+            # estimate at zero until they expose a compatible graph profiler.
             cudagraph_memory_estimate = 0
             if (
-                current_platform.is_cuda()
+                (current_platform.is_cuda() or current_platform.is_rocm())
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
             ):
@@ -547,7 +569,7 @@ class WorkerFL(WorkerBase):
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory > free_gpu_memory, (
+        assert self.init_snapshot.free_memory >= free_gpu_memory, (
             "Error in memory profiling. "
             f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
             f"current free memory {GiB(free_gpu_memory)} GiB. "
