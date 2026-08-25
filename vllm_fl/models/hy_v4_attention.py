@@ -182,12 +182,32 @@ class Indexer(nn.Module):
         self.quant_block_size = 128
         self.topk_indices_buffer = topk_indices_buffer
 
-        # FP8 naive cache: values in fp8 plus one fp32 scale per
-        # ``quant_block_size`` elements.
+        # Indexer k-cache layout must match the MQA-logits kernel that
+        # SparseAttnIndexer ends up calling:
+        #   - NVIDIA/CUDA: FP8 naive cache — values in fp8 plus one fp32 scale
+        #     per ``quant_block_size`` elements, so head_dim = head_dim + 4.
+        #     deep_gemm's fp8_paged_mqa_logits consumes this packed layout.
+        #   - MACA/MetaX: MACA has no fp8_mqa_logits, so the indexer is forced
+        #     onto the bf16 kernel (see hy_v4_v024._patch_sparse_attn_indexer_for_maca
+        #     and mx_sparse_attn_indexer_bf16). bf16_paged_mqa_logits asserts
+        #     ``kv_dim == head_dim`` (no packed scale), so the cache must be a
+        #     plain bf16 buffer of width head_dim. Writing the fp8-packed width
+        #     (head_dim + 4) here is what triggered the decode-time
+        #     ``assert kv_heads == 1 and kv_dim == head_dim`` failure in
+        #     deep_gemm/bf16_attention.py:366. Mirrors vllm_metax's own
+        #     DeepseekV32Indexer branch (default VLLM_METAX_USE_FP8_SPARSE_ATTN_INDEXER=0).
         assert cache_config is not None, "HYV4 indexer requires cache_config"
+        if current_platform.is_cuda():
+            k_cache_head_dim = (
+                self.head_dim + self.head_dim // self.quant_block_size * 4
+            )
+            k_cache_dtype = torch.uint8
+        else:
+            k_cache_head_dim = self.head_dim
+            k_cache_dtype = torch.bfloat16
         self.k_cache = DeepseekV32IndexerCache(
-            head_dim=self.head_dim + self.head_dim // self.quant_block_size * 4,
-            dtype=torch.uint8,
+            head_dim=k_cache_head_dim,
+            dtype=k_cache_dtype,
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
         )
