@@ -329,6 +329,88 @@ def _register_mx_sparse_attn_indexer_op() -> bool:
     return hasattr(torch.ops.vllm, "mx_sparse_attn_indexer")
 
 
+def _patch_bf16_paged_mqa_logits_debug() -> None:
+    """Wrap vllm_metax's bf16_paged_mqa_logits to dump decode-time inputs.
+
+    The decode-phase indexer kernel bf16_paged_mqa_logits_scheduled_kernel
+    hit a MACA hardware trap (Xnack/ATU Fault = out-of-bounds device read).
+    An ATU fault in a paged kernel almost always means block_tables points
+    past the physically allocated KV blocks, context_lens/schedule_metadata
+    disagree with the cache, or the cache stride the kernel assumes differs
+    from how we allocated it. Its own docstring claims the cache should be
+    [num_blocks, block_size, 1, D+4] uint8 (packed bf16+scale), which is at
+    odds with our plain-bf16 [.., D] allocation — this log lets us confirm
+    the real shapes/strides and whether block_tables exceeds num_blocks
+    before the kernel dereferences them.
+
+    One-shot (first decode call) to avoid per-step spam.
+    """
+    import torch
+
+    try:
+        from vllm_metax.utils import deep_gemm as _mx_dg
+    except Exception as e:  # pragma: no cover - metax not present
+        logger.warning(f"Cannot import vllm_metax.utils.deep_gemm for debug: {e}")
+        return
+
+    _orig = getattr(_mx_dg, "bf16_paged_mqa_logits", None)
+    if _orig is None or getattr(_orig, "_hy4_debug_wrapped", False):
+        return
+
+    @wraps(_orig)
+    def _wrapped(q_bf16, kv_cache_bf16, weights, context_lens, block_tables,
+                 schedule_metadata, max_model_len, *args, **kwargs):
+        if not getattr(_wrapped, "_logged", False):
+            _wrapped._logged = True
+            try:
+                bt = block_tables
+                cl = context_lens
+                num_blocks = kv_cache_bf16.shape[0] if kv_cache_bf16.ndim >= 1 else None
+                bt_max = int(bt.max().item()) if bt is not None and bt.numel() else None
+                bt_min = int(bt.min().item()) if bt is not None and bt.numel() else None
+                cl_max = int(cl.max().item()) if cl is not None and cl.numel() else None
+                logger.info(
+                    "[hy4-paged-mqa] q_bf16=%s/%s kv_cache=%s/%s "
+                    "(num_blocks=%s block_size=%s last2=%s) weights=%s/%s "
+                    "context_lens=%s/%s(max=%s) block_tables=%s/%s(min=%s max=%s) "
+                    "schedule_metadata=%s/%s max_model_len=%s | "
+                    "OOB CHECK: block_tables.max(%s) must be < num_blocks(%s)",
+                    tuple(q_bf16.shape), q_bf16.dtype,
+                    tuple(kv_cache_bf16.shape), kv_cache_bf16.dtype,
+                    num_blocks,
+                    kv_cache_bf16.shape[1] if kv_cache_bf16.ndim >= 2 else None,
+                    tuple(kv_cache_bf16.shape[-2:]) if kv_cache_bf16.ndim >= 2 else None,
+                    tuple(weights.shape), weights.dtype,
+                    tuple(cl.shape), cl.dtype, cl_max,
+                    tuple(bt.shape), bt.dtype, bt_min, bt_max,
+                    tuple(schedule_metadata.shape) if schedule_metadata is not None else None,
+                    schedule_metadata.dtype if schedule_metadata is not None else None,
+                    max_model_len,
+                    bt_max, num_blocks,
+                )
+                if bt_max is not None and num_blocks is not None and bt_max >= num_blocks:
+                    logger.warning(
+                        "[hy4-paged-mqa] block_tables.max(%s) >= num_blocks(%s) "
+                        "-> paged kernel WILL read OOB (this is the ATU Fault).",
+                        bt_max, num_blocks,
+                    )
+            except Exception as le:
+                logger.warning(f"[hy4-paged-mqa] debug logging failed: {le}")
+        return _orig(q_bf16, kv_cache_bf16, weights, context_lens, block_tables,
+                     schedule_metadata, max_model_len, *args, **kwargs)
+
+    _wrapped._hy4_debug_wrapped = True
+    _mx_dg.bf16_paged_mqa_logits = _wrapped
+    # The bf16 indexer module imported the symbol by value; patch it there too.
+    try:
+        import vllm_metax.customized.layers.sparse_attn_indexer.bf16 as _mx_bf16
+        if hasattr(_mx_bf16, "bf16_paged_mqa_logits"):
+            _mx_bf16.bf16_paged_mqa_logits = _wrapped
+    except Exception as e:
+        logger.warning(f"[hy4-paged-mqa] could not patch bf16 module symbol: {e}")
+    logger.info("[hy4-paged-mqa] wrapped bf16_paged_mqa_logits for one-shot debug")
+
+
 def _patch_sparse_attn_indexer_for_maca() -> None:
     """Patch SparseAttnIndexer.forward_native to use MetaX kernels.
 
@@ -433,6 +515,8 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
             "Patched SparseAttnIndexer.forward_native to use MetaX "
             "mx_sparse_attn_indexer op"
         )
+        # Instrument the decode paged-logits kernel to catch the ATU Fault.
+        _patch_bf16_paged_mqa_logits_debug()
     except Exception as e:
         logger.warning(f"Failed to patch SparseAttnIndexer: {e}")
 
