@@ -555,11 +555,12 @@ class ModelRunnerFL(
             self.ngram_eos_token_id = 0
         if self.uses_ngram_embedding and self.ngram_context_len <= 0:
             raise ValueError("N-gram embedding requires context length >= 1.")
-        if self.uses_ngram_embedding and len(get_pp_group().ranks) > 1:
-            raise RuntimeError(
-                "N-gram PLE embedding currently requires "
-                "pipeline_parallel_size=1."
-            )
+        # FIXME(iluvatar): PLE PP>1 support needs testing, temporarily disabled
+        # if self.uses_ngram_embedding and len(get_pp_group().ranks) > 1:
+        #     raise RuntimeError(
+        #         "N-gram PLE embedding currently requires "
+        #         "pipeline_parallel_size=1."
+        #     )
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
