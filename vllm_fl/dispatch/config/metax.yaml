@@ -48,10 +48,17 @@ op_backends:
     - reference
 
 # FlagOS operator blacklist
+# NOTE: runtime deployments set VLLM_FL_FLAGOS_BLACKLIST which fully overrides
+# this list (see utils.get_flag_gems_whitelist_blacklist). This is the fallback
+# default when that env var is unset.
 flagos_blacklist:
   - masked_fill
   - masked_fill_
   - layer_norm
+  # bmm/bmm_out: torch.bmm(out=...) in MLA forward crashes on MACA (CUDA
+  # illegal memory access in flag_gems/ops/bmm.py); fall back to native bmm.
+  - bmm
+  - bmm_out
 
 # OOT (Out-of-Tree) operator blacklist
 oot_blacklist:
