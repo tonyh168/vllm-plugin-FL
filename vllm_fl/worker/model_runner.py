@@ -6035,8 +6035,17 @@ class ModelRunnerFL(
                 query_start_loc_np[num_reqs + 1:] = query_start_loc_np[num_reqs]
                 query_start_loc = torch.from_numpy(query_start_loc_np).to(self.device)
                 model_kwargs["query_start_loc"] = query_start_loc
-                # Dummy ngram_context (empty dict) for profiling
-                model_kwargs["ngram_context"] = {}
+                # Dummy ngram_context: tensor of EOS tokens (shape [num_reqs, ngram_context_len])
+                # Use a reasonable context length for profiling (e.g., 32 tokens)
+                ngram_context_len = 32
+                # Assume EOS token ID is 0 (will be replaced by model's actual EOS)
+                # For proper profiling, use a tensor filled with 0 or the model's pad token
+                ngram_context = torch.zeros(
+                    (num_reqs_padded, ngram_context_len),
+                    dtype=torch.long,
+                    device=self.device
+                )
+                model_kwargs["ngram_context"] = ngram_context
 
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),

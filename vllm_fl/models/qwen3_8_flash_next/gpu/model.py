@@ -780,17 +780,19 @@ class Qwen3_8FlashNextModel(nn.Module):
                 )
                 hidden_states = hidden_states + deepstack_embed
 
+        import sys as _sys
+        print(f"[DBG-FWD] layers done, is_last_rank={get_pp_group().is_last_rank}, hidden_states.shape={hidden_states.shape}", file=_sys.stderr, flush=True)
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
+        print(f"[DBG-FWD] entering hyper_connection_mixer", file=_sys.stderr, flush=True)
         if self._mtp_hidden_buffer is not None:
-            # Capture the pre-final-mixer multi-stream residual
-            # [T, hc_count*H] for the MTP drafter (zero extra compute:
-            # this tensor is needed by the final mixer regardless).
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states)
         assert self.hyper_connection_mixer is not None
         hidden_states, _ = self.hyper_connection_mixer.mix(hidden_states)
+        print(f"[DBG-FWD] hyper_connection_mixer done", file=_sys.stderr, flush=True)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -814,6 +816,8 @@ class Qwen3_8FlashNextModel(nn.Module):
             "token_lookup",
             "hyper_connection_mixer.block_inject_weight",
         ]
+        if not get_pp_group().is_last_rank:
+            skip_substrs.append("hyper_connection_mixer")
         mapper = self.hf_to_vllm_mapper
         loader_cls = AutoWeightsLoader
         legacy_loaded: set[str] = set()
