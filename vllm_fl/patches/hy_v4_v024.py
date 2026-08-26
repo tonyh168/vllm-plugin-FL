@@ -430,39 +430,14 @@ def _patch_bf16_paged_mqa_logits_debug() -> None:
                     _peek(cl), _peek(bt), _peek(schedule_metadata),
                 )
 
-                # Side-by-side reference: recompute what schedule_metadata SHOULD
-                # be right here, in this same process, from context_lens+block_size
-                # +num_sms. If the passed-in one differs wildly -> confirms it was
-                # never filled (the is_cuda() gate bug). If they match -> the dirty
-                # -metadata theory is wrong and we look elsewhere.
-                try:
-                    from vllm.utils.deep_gemm import (
-                        get_paged_mqa_logits_metadata as _gpm,
-                    )
-                    block_size = (kv_cache_bf16.shape[1]
-                                  if kv_cache_bf16.ndim >= 2 else 64)
-                    num_sms = None
-                    if schedule_metadata is not None and schedule_metadata.ndim >= 1:
-                        num_sms = schedule_metadata.shape[0] - 1  # buffer is (num_sms+1, 2)
-                    if num_sms and num_sms > 0:
-                        ref = _gpm(cl.reshape(-1).to(torch.int32), int(block_size),
-                                   int(num_sms))
-                        same = bool(schedule_metadata is not None
-                                    and tuple(ref.shape) == tuple(schedule_metadata.shape)
-                                    and torch.equal(ref.cpu(),
-                                                    schedule_metadata.cpu()))
-                        logger.warning(
-                            "[hy4-paged-mqa] REF schedule_metadata (recomputed, "
-                            "block_size=%s num_sms=%s): %s | MATCHES_PASSED_IN=%s "
-                            "%s",
-                            block_size, num_sms, _peek(ref), same,
-                            "" if same else "<-- MISMATCH => passed-in schedule_"
-                            "metadata is stale/uninitialised (root cause)",
-                        )
-                except Exception as re:
-                    logger.warning(
-                        "[hy4-paged-mqa] could not recompute reference "
-                        "schedule_metadata: %s", re)
+                # NOTE: the "REF schedule_metadata recompute + MATCHES_PASSED_IN"
+                # block was removed here. It derived num_sms from
+                # schedule_metadata.shape[0]-1, but after the round-16 fix the
+                # buffer is (num_blocks+1, 2)=(3329,2), so that reverse-derivation
+                # produced num_sms=3328 and the recompute always reported a false
+                # MISMATCH. Its job (confirming the round-12/13 dirty-metadata root
+                # cause) is done; keeping it now only misleads. The VALUES dump
+                # above still shows the actual passed-in schedule_metadata content.
             except Exception as le:
                 logger.warning(f"[hy4-paged-mqa] debug logging failed: {le}")
         return _orig(q_bf16, kv_cache_bf16, weights, context_lens, block_tables,
