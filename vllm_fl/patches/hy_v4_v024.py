@@ -406,6 +406,63 @@ def _patch_bf16_paged_mqa_logits_debug() -> None:
                         "-> paged kernel WILL read OOB (this is the ATU Fault).",
                         bt_max, num_blocks,
                     )
+
+                # --- CONTENT dump: root-cause hypothesis is that schedule_metadata
+                # is UNINITIALISED garbage (torch.empty never filled on non-CUDA).
+                # Shapes alone can't tell; we must inspect the actual VALUES.
+                def _peek(t, n=16):
+                    # Flatten to CPU and show first n values + basic stats without
+                    # a full .cpu() sync of a huge tensor.
+                    if t is None:
+                        return "None"
+                    try:
+                        flat = t.detach().reshape(-1)
+                        head = flat[:n].tolist()
+                        tmin = int(flat.min().item())
+                        tmax = int(flat.max().item())
+                        return f"head{n}={head} min={tmin} max={tmax} numel={flat.numel()}"
+                    except Exception as pe:
+                        return f"<peek failed: {pe}>"
+
+                logger.warning(
+                    "[hy4-paged-mqa] VALUES: context_lens=%s | block_tables=%s | "
+                    "schedule_metadata=%s",
+                    _peek(cl), _peek(bt), _peek(schedule_metadata),
+                )
+
+                # Side-by-side reference: recompute what schedule_metadata SHOULD
+                # be right here, in this same process, from context_lens+block_size
+                # +num_sms. If the passed-in one differs wildly -> confirms it was
+                # never filled (the is_cuda() gate bug). If they match -> the dirty
+                # -metadata theory is wrong and we look elsewhere.
+                try:
+                    from vllm.utils.deep_gemm import (
+                        get_paged_mqa_logits_metadata as _gpm,
+                    )
+                    block_size = (kv_cache_bf16.shape[1]
+                                  if kv_cache_bf16.ndim >= 2 else 64)
+                    num_sms = None
+                    if schedule_metadata is not None and schedule_metadata.ndim >= 1:
+                        num_sms = schedule_metadata.shape[0] - 1  # buffer is (num_sms+1, 2)
+                    if num_sms and num_sms > 0:
+                        ref = _gpm(cl.reshape(-1).to(torch.int32), int(block_size),
+                                   int(num_sms))
+                        same = bool(schedule_metadata is not None
+                                    and tuple(ref.shape) == tuple(schedule_metadata.shape)
+                                    and torch.equal(ref.cpu(),
+                                                    schedule_metadata.cpu()))
+                        logger.warning(
+                            "[hy4-paged-mqa] REF schedule_metadata (recomputed, "
+                            "block_size=%s num_sms=%s): %s | MATCHES_PASSED_IN=%s "
+                            "%s",
+                            block_size, num_sms, _peek(ref), same,
+                            "" if same else "<-- MISMATCH => passed-in schedule_"
+                            "metadata is stale/uninitialised (root cause)",
+                        )
+                except Exception as re:
+                    logger.warning(
+                        "[hy4-paged-mqa] could not recompute reference "
+                        "schedule_metadata: %s", re)
             except Exception as le:
                 logger.warning(f"[hy4-paged-mqa] debug logging failed: {le}")
         return _orig(q_bf16, kv_cache_bf16, weights, context_lens, block_tables,
