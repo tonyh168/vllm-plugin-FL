@@ -97,6 +97,17 @@ def _patch_custom_ops():
 
 def register():
     """Register the FL platform."""
+    # Loud, unmissable banner printed once per process at the earliest plugin
+    # entry point. Lets us confirm from the startup log EXACTLY which build/commit
+    # each worker actually imported — a stale ray worker running old code shows a
+    # different sha here than a freshly-installed package.
+    logger.warning(
+        "=== vllm-plugin-FL LOADED: version=%s git=%s date=%s file=%s ===",
+        getattr(version, "__version__", "unknown"),
+        getattr(version, "git_version", "Unknown"),
+        version.git_info.get("date", "Unknown") if hasattr(version, "git_info") else "Unknown",
+        __file__,
+    )
     _patch_custom_ops()
     _patch_flash_attn_import()
     _patch_transformers_compat()
