@@ -127,16 +127,15 @@ def patch_indexer_schedule_metadata():
 def apply_platform_patches():
     """All GLM-5 patches needed at platform registration time.
 
-    Runs in ``register()`` in every process (incl. ray workers), so the
-    indexer schedule_metadata fix lands in the workers that actually build
-    decode metadata — not just the driver.
+    NOTE: ``patch_indexer_schedule_metadata`` is deliberately NOT called here.
+    ``register()`` runs at platform-registration time, before
+    ``vllm.utils.torch_utils`` finishes initialising; importing the indexer
+    module that early triggers a circular import
+    (``cannot import name 'is_quantized_kv_cache'``). It is applied later from
+    ``apply_hy_v4_v024_patches`` (register_model time) instead, which is still
+    per-process (every ray worker) but past the init-order hazard.
     """
     patch_tokenizer_compat()
-    try:
-        patch_indexer_schedule_metadata()
-    except Exception as e:
-        logger.warning("[hy4-sched-meta] failed to apply schedule_metadata "
-                       "patch: %s", e)
 
 def patch_indexer_rope_reshape():
     """Fix RoPE output shape in Indexer.forward for DSA models.

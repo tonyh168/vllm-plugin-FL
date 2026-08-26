@@ -723,6 +723,18 @@ def apply_hy_v4_v024_patches() -> bool:
     # Patch FlashMLA sparse decode to use MetaX kernels
     _patch_flashmla_sparse_for_metax()
 
+    # Fill decode schedule_metadata on MetaX (upstream is_cuda() gate leaves the
+    # buffer uninitialised -> paged MQA kernel reads garbage -> ATU Fault).
+    # Applied here (register_model time) rather than in glm_moe_dsa's
+    # apply_platform_patches (register time) to avoid a circular import of
+    # vllm.utils.torch_utils that fails at the earlier init stage.
+    try:
+        from vllm_fl.patches.glm_moe_dsa import patch_indexer_schedule_metadata
+        patch_indexer_schedule_metadata()
+    except Exception as e:
+        logger.warning("[hy4-sched-meta] failed to apply schedule_metadata "
+                       "patch: %s", e)
+
     logger.info("Installed HY4 runtime compatibility for vLLM 0.24")
     return True
 
