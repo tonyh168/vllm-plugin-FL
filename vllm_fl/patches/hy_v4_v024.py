@@ -325,6 +325,15 @@ def _register_mx_sparse_attn_indexer_op() -> bool:
         if spec is None or spec.loader is None:
             return False
         mod = importlib.util.module_from_spec(spec)
+        # Register in sys.modules BEFORE exec (the standard import contract):
+        # module_from_spec + exec_module does not do this automatically, so the
+        # module was previously invisible to sys.modules.get(mod_name). The
+        # bf16 paged-mqa debug hook relies on finding "vllm_metax_indexer_bf16"
+        # there to patch the by-value-imported bf16_paged_mqa_logits symbol
+        # (bf16.py:188 calls it by bare name). Registering pre-exec also matches
+        # CPython's own import machinery and avoids half-initialized modules on
+        # any circular import.
+        sys.modules[mod_name] = mod
         spec.loader.exec_module(mod)
     return hasattr(torch.ops.vllm, "mx_sparse_attn_indexer")
 
