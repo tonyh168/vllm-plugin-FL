@@ -104,16 +104,26 @@ def patch_indexer_schedule_metadata():
             block_size = getattr(self.kv_cache_spec, "storage_block_size", None)
             if block_size is None:
                 block_size = self.kv_cache_spec.block_size
-            self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
+            # Do NOT assign into self.scheduler_metadata_buffer[:] — the upstream
+            # builder allocates that buffer as (num_sms+1, 2) == (105, 2), but on
+            # MetaX the DeepGEMM kernel's metadata is (num_blocks+1, 2) == e.g.
+            # (3329, 2) (metax indexer.py:326 uses get_num_blocks_paged_mqa_logits
+            # _metadata, not num_sms). An in-place copy raises "expanded size 105
+            # must match existing size 3329". Instead take the freshly returned
+            # tensor (already the correct size) and rebind it onto the decode
+            # metadata, so the kernel receives a right-sized, initialised table.
+            sched = get_paged_mqa_logits_metadata(
                 decode.seq_lens, block_size, self.num_sms
             )
+            decode.schedule_metadata = sched
             if not getattr(_patched_build, "_logged", False):
                 _patched_build._logged = True
                 logger.warning(
-                    "[hy4-sched-meta] recomputed schedule_metadata on non-CUDA "
-                    "path (block_size=%s num_sms=%s seq_lens.shape=%s) -> buffer "
-                    "now initialised, decode paged kernel safe",
+                    "[hy4-sched-meta] rebound schedule_metadata on non-CUDA path "
+                    "(block_size=%s num_sms=%s seq_lens.shape=%s sched.shape=%s) "
+                    "-> right-sized + initialised, decode paged kernel safe",
                     block_size, self.num_sms, tuple(decode.seq_lens.shape),
+                    tuple(sched.shape),
                 )
         return result
 
