@@ -53,20 +53,34 @@ def patch_tokenizer_compat():
 
 
 def patch_indexer_schedule_metadata():
-    """Fix schedule_metadata not computed when VLLM_USE_DEEP_GEMM=0.
+    """Fill decode ``schedule_metadata`` on non-CUDA (MetaX) accelerators.
 
-    In vLLM 0.13.0, the indexer metadata builder gates schedule_metadata
-    computation behind ``is_deep_gemm_supported()`` which checks
-    ``VLLM_USE_DEEP_GEMM``. But the DSA kernel (fp8_paged_mqa_logits)
-    only checks ``has_deep_gemm()`` — so when VLLM_USE_DEEP_GEMM=0 and
-    deep_gemm is installed, the kernel runs with uninitialised metadata,
-    causing CUDA_ERROR_ILLEGAL_ADDRESS.
+    Root cause (confirmed by runtime dumps, hy4-metax log rounds 12-13):
+    upstream ``DeepseekV32IndexerMetadataBuilder.build`` gates the
+    ``schedule_metadata`` computation behind
+    ``if current_platform.is_cuda() and has_deep_gemm():`` (indexer.py:616),
+    yet it *unconditionally* stores the buffer into the decode metadata
+    (indexer.py:625). On MetaX ``current_platform.is_cuda()`` is False (it is
+    cuda_alike but not NVIDIA), so the buffer is left as the uninitialised
+    ``torch.empty((num_sms+1, 2), int32)`` allocation. The bf16 paged MQA
+    logits kernel then reads that garbage as its SM schedule and walks off
+    into unmapped memory -> MACA Xnack/ATU Fault (== CUDA illegal memory
+    access). Dumps showed schedule_metadata full of billion-scale +/- ints
+    while the correct table is small 0/1 values.
 
-    Fix: patch the builder's ``build`` method to always compute
-    schedule_metadata when ``has_deep_gemm()`` is True.
+    Fix: wrap ``build`` and, whenever a decode metadata was produced, recompute
+    ``schedule_metadata`` ourselves — regardless of ``is_cuda()``. We reuse the
+    *already-correct* ``result.decode.seq_lens`` that ``build`` just computed
+    (it went through the compress_ratio conversion + 2D unsqueeze), rather than
+    re-deriving from the raw ``common_attn_metadata.seq_lens``. This keeps us in
+    lock-step with upstream's own arguments and avoids parallel-logic drift.
+    We also use ``storage_block_size`` (with ``block_size`` fallback) to match
+    upstream indexer.py:619.
     """
     from vllm.utils.import_utils import has_deep_gemm
     if not has_deep_gemm():
+        logger.warning("[hy4-sched-meta] has_deep_gemm() is False; paged MQA "
+                       "kernel unused, skipping schedule_metadata patch")
         return
 
     from vllm.v1.attention.backends.mla.indexer import (
@@ -74,30 +88,55 @@ def patch_indexer_schedule_metadata():
     )
     from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
 
+    if getattr(DeepseekV32IndexerMetadataBuilder, "_fl_sched_meta_patched", False):
+        return
     _orig_build = DeepseekV32IndexerMetadataBuilder.build
 
     def _patched_build(self, common_prefix_len, common_attn_metadata,
                        fast_build=False):
         result = _orig_build(self, common_prefix_len,
                              common_attn_metadata, fast_build)
-        if (result.decode is not None
-                and result.decode.schedule_metadata is not None):
-            seq_lens = common_attn_metadata.seq_lens[:result.num_decodes]
-            self.scheduler_metadata_buffer[:] = (
-                get_paged_mqa_logits_metadata(
-                    seq_lens, self.kv_cache_spec.block_size, self.num_sms
-                )
+        decode = getattr(result, "decode", None)
+        if decode is not None and decode.schedule_metadata is not None:
+            # Reuse the seq_lens build() already stored on the decode metadata
+            # (compress_ratio-adjusted, 2D). This is exactly what the kernel
+            # will index against, so the schedule must be derived from it.
+            block_size = getattr(self.kv_cache_spec, "storage_block_size", None)
+            if block_size is None:
+                block_size = self.kv_cache_spec.block_size
+            self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
+                decode.seq_lens, block_size, self.num_sms
             )
+            if not getattr(_patched_build, "_logged", False):
+                _patched_build._logged = True
+                logger.warning(
+                    "[hy4-sched-meta] recomputed schedule_metadata on non-CUDA "
+                    "path (block_size=%s num_sms=%s seq_lens.shape=%s) -> buffer "
+                    "now initialised, decode paged kernel safe",
+                    block_size, self.num_sms, tuple(decode.seq_lens.shape),
+                )
         return result
 
     DeepseekV32IndexerMetadataBuilder.build = _patched_build
-    logger.info("Patched indexer: schedule_metadata always computed "
-                "when deep_gemm is available")
+    DeepseekV32IndexerMetadataBuilder._fl_sched_meta_patched = True
+    logger.warning("[hy4-sched-meta] patched DeepseekV32IndexerMetadataBuilder."
+                   "build: schedule_metadata always computed when deep_gemm "
+                   "available (fixes MetaX is_cuda() gate leaving it garbage)")
 
 
 def apply_platform_patches():
-    """All GLM-5 patches needed at platform registration time."""
+    """All GLM-5 patches needed at platform registration time.
+
+    Runs in ``register()`` in every process (incl. ray workers), so the
+    indexer schedule_metadata fix lands in the workers that actually build
+    decode metadata — not just the driver.
+    """
     patch_tokenizer_compat()
+    try:
+        patch_indexer_schedule_metadata()
+    except Exception as e:
+        logger.warning("[hy4-sched-meta] failed to apply schedule_metadata "
+                       "patch: %s", e)
 
 def patch_indexer_rope_reshape():
     """Fix RoPE output shape in Indexer.forward for DSA models.
