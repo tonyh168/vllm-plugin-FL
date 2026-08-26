@@ -378,7 +378,10 @@ def _patch_bf16_paged_mqa_logits_debug() -> None:
                 bt_max = int(bt.max().item()) if bt is not None and bt.numel() else None
                 bt_min = int(bt.min().item()) if bt is not None and bt.numel() else None
                 cl_max = int(cl.max().item()) if cl is not None and cl.numel() else None
-                logger.info(
+                # WARNING level: this deployment filters INFO for the
+                # vllm_fl.patches.hy_v4_v024 logger, so the whole point of the
+                # hook (this dump) is invisible at INFO. Use WARNING so it lands.
+                logger.warning(
                     "[hy4-paged-mqa] q_bf16=%s/%s kv_cache=%s/%s "
                     "(num_blocks=%s block_size=%s last2=%s) weights=%s/%s "
                     "context_lens=%s/%s(max=%s) block_tables=%s/%s(min=%s max=%s) "
@@ -434,15 +437,17 @@ def _patch_bf16_paged_mqa_logits_debug() -> None:
             if getattr(_m, "bf16_paged_mqa_logits", None) is _orig:
                 _m.bf16_paged_mqa_logits = _wrapped
                 patched_here = True
-                logger.info("[hy4-paged-mqa] patched symbol in module %s", _name)
+                logger.warning("[hy4-paged-mqa] patched symbol in module %s", _name)
         except Exception as pe:
             logger.warning("[hy4-paged-mqa] probe of %s failed: %s", _name, pe)
     if not patched_here:
-        logger.info(
-            "[hy4-paged-mqa] bf16 module symbol not patched here; source-module "
-            "patch on deep_gemm covers imports resolved after this point"
+        logger.warning(
+            "[hy4-paged-mqa] bf16 module symbol NOT patched here (sys.modules "
+            "miss); source-module patch on deep_gemm may NOT cover bf16.py's "
+            "by-value import — decode dump may not fire"
         )
-    logger.info("[hy4-paged-mqa] wrapped bf16_paged_mqa_logits for one-shot debug")
+    # WARNING level on purpose: this deployment filters INFO for this logger.
+    logger.warning("[hy4-paged-mqa] wrapped bf16_paged_mqa_logits for one-shot debug")
 
 
 def _patch_sparse_attn_indexer_for_maca() -> None:
@@ -500,7 +505,8 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
             # class attr so it prints once (prefill + decode) not every step.
             if not getattr(SparseAttnIndexer, "_mx_bf16_shape_logged", False):
                 kv = self.k_cache.kv_cache
-                logger.info(
+                # WARNING: INFO is filtered for this logger in the deployment.
+                logger.warning(
                     "[hy4-indexer-bf16] q_values=%s/%s k=%s/%s kv_cache=%s/%s "
                     "head_dim=%s quant_block_size=%s scale_fmt=%s topk=%s "
                     "q_scale=%s skip_k_cache_insert=%s use_fp4_cache=%s | "
