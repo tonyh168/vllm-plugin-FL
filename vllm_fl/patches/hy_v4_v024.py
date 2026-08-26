@@ -563,7 +563,7 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                     )
                 SparseAttnIndexer._mx_bf16_shape_logged = True
 
-            return torch.ops.vllm.mx_sparse_attn_indexer_bf16(
+            topk_indices = torch.ops.vllm.mx_sparse_attn_indexer_bf16(
                 hidden_states,
                 _encode_layer_name(self.k_cache.prefix),
                 self.k_cache.kv_cache,
@@ -581,6 +581,43 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                 self.skip_k_cache_insert,
                 self.use_fp4_cache,
             )
+
+            # Diagnose the "model repeats the last input token" garbage output
+            # (log round 17). Symptom == attention aggregates ~nothing, which for
+            # a DSA sparse model usually means the indexer's top-k selection is
+            # broken (all -1 / all same pos / uninitialised), so attention only
+            # ever sees one token. Dump the ACTUAL selected indices for the first
+            # few query rows so we can tell which failure mode this is:
+            #   all -1         -> indexer selected no KV (empty) -> repeats
+            #   all 0 / one pos -> selection collapsed to a single position
+            #   huge +/- ints   -> buffer uninitialised (like schedule_metadata was)
+            #   sane spread     -> top-k is fine, look at logits/weighting/MLA next
+            # Gated to print a handful of times (prefill + first decode steps).
+            _n = getattr(SparseAttnIndexer, "_mx_topk_dump_count", 0)
+            if _n < 4:
+                SparseAttnIndexer._mx_topk_dump_count = _n + 1
+                try:
+                    ti = topk_indices
+                    rows = min(3, ti.shape[0])
+                    cols = min(12, ti.shape[-1])
+                    sample = ti[:rows, :cols].detach().cpu().tolist()
+                    flat = ti.detach().reshape(-1)
+                    n_neg1 = int((flat == -1).sum().item())
+                    logger.warning(
+                        "[hy4-topk] shape=%s dtype=%s | per-row[:%d,:%d]=%s | "
+                        "min=%s max=%s numel=%s neg1_count=%s (%.1f%%) | "
+                        "phase=%s(q_rows=%s topk_tokens=%s)",
+                        tuple(ti.shape), ti.dtype, rows, cols, sample,
+                        int(flat.min().item()), int(flat.max().item()),
+                        flat.numel(), n_neg1,
+                        100.0 * n_neg1 / max(1, flat.numel()),
+                        "prefill" if q_values.shape[0] > 1 else "decode",
+                        q_values.shape[0], self.topk_tokens,
+                    )
+                except Exception as te:
+                    logger.warning("[hy4-topk] dump failed: %s", te)
+
+            return topk_indices
 
         SparseAttnIndexer.forward_native = _forward_native_maca
         logger.info(
