@@ -34,6 +34,10 @@ from . import version as version  # PyTorch-style: vllm_fl.version.git_version
 
 logger = logging.getLogger(__name__)
 
+# Guard so the version banner prints once per process (register() is invoked
+# repeatedly along the plugin-load chain).
+_VERSION_LOGGED = False
+
 
 def __getattr__(name):
     if name == "distributed":
@@ -114,6 +118,20 @@ def _patch_custom_ops():
 
 def register():
     """Register the FL platform."""
+    # Print the plugin-FL code version at the very first entry point every
+    # process (incl. each spawned Ray worker) hits when loading this plugin.
+    # Worker-class hooks proved unreliable for this, so anchor it here where
+    # execution is guaranteed. Emitted to stdout with flush so it survives
+    # regardless of logger level / Ray log capture.
+    global _VERSION_LOGGED
+    if not _VERSION_LOGGED:
+        _VERSION_LOGGED = True
+        try:
+            from vllm_fl.utils import log_plugin_fl_version
+            log_plugin_fl_version()
+        except Exception as _e:
+            print(f"[plugin-FL version] <failed to compute: {_e}>", flush=True)
+
     _patch_custom_ops()
     _patch_flash_attn_import()
     _patch_transformers_compat()
