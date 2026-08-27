@@ -527,6 +527,20 @@ def apply_glm5_next_v024_patches() -> bool:
     # wheel genuinely lacks _C_cache_ops.concat_and_cache_mla.
     _install_mla_boundary_compat_ops()
 
+    # vLLM 0.24 selects a separate MLA *prefill* backend in
+    # MLAAttention.__init__ (get_mla_prefill_backend), independent of the
+    # vendor attn_backend chosen by vllm-FL dispatch.  On non-Blackwell the
+    # only candidate is FLASH_ATTN, whose availability probe requires the
+    # compiled vllm.vllm_flash_attn (_vllm_fa2_C) extension MetaX lacks -- so
+    # model construction aborts before weight load.  On out-of-tree platforms
+    # rebind FLASH_ATTN onto the standalone flash_attn wheel.
+    if current_platform.is_out_of_tree():
+        from vllm_fl.patches.glm5_next_mla_prefill import (
+            install_glm5_next_mla_prefill_backend,
+        )
+
+        install_glm5_next_mla_prefill_backend()
+
     for architecture in (_CAUSAL_ARCH, _CONDITIONAL_ARCH):
         model_config.MODELS_CONFIG_MAP[architecture] = Glm5NextForCausalLMConfig
 
