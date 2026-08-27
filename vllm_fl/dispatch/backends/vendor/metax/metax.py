@@ -27,6 +27,19 @@ def register_attention_backends():
         AttentionBackendEnum.FLASH_ATTN,
         class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.flash_attn.MacaFlashAttentionBackend",
     )
+    # FLASHMLA_SPARSE: GLM5.3-Flash uses sparse MLA (deepseek_sparse_attention,
+    # index_topk). Without a MetaX-specific registration, the sparse path falls
+    # through to vLLM upstream's flashmla_sparse.py, which hard-requires the
+    # compiled extension `vllm._flashmla_C` (absent on MetaX) and crashes with
+    # "vllm._flashmla_C is not available". The MetaX sparse kernel is provided by
+    # the `flash_mla` python package (flash_mla.flash_mla_interface.
+    # flash_mla_sparse_fwd), wired up by vllm_metax's MacaFlashMLASparseBackend.
+    # Reuse it directly instead of vendoring the full 2600+ line sparse stack
+    # (backend + indexer + sparse_swa), mirroring vllm_metax.platform.
+    register_backend(
+        AttentionBackendEnum.FLASHMLA_SPARSE,
+        class_path="vllm_metax.v1.attention.backends.mla.flashmla_sparse.MacaFlashMLASparseBackend",
+    )
 
 
 class MacaBackend(Backend):
