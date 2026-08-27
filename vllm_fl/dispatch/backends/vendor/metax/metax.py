@@ -12,13 +12,28 @@ from typing import Optional, Union
 
 import torch
 
+from vllm.logger import init_logger
+
 from vllm_fl.dispatch.backends.base import Backend
 
-from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
+    _ATTN_OVERRIDES,
+    register_backend,
+)
+
+logger = init_logger(__name__)
+
+# Per-process guard: register once and log once per process (incl. each spawned
+# Ray worker). Repeat calls (e.g. lazy call from attention_backend()) are no-ops
+# but still cheap; the flag only suppresses duplicate logging.
+_ATTN_BACKENDS_REGISTERED = False
 
 
 # Register attention backends for MACA
 def register_attention_backends():
+    global _ATTN_BACKENDS_REGISTERED
+
     register_backend(
         AttentionBackendEnum.FLASHMLA,
         class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.mla.flashmla.MacaFlashMLABackend",
@@ -40,6 +55,27 @@ def register_attention_backends():
         AttentionBackendEnum.FLASHMLA_SPARSE,
         class_path="vllm_metax.v1.attention.backends.mla.flashmla_sparse.MacaFlashMLASparseBackend",
     )
+
+    # Log once per process what actually landed in _ATTN_OVERRIDES. This is the
+    # ground truth the backend selector reads via AttentionBackendEnum.get_path()
+    # -> get_class(). If the crash reappears in upstream flashmla_sparse.py while
+    # this line shows the vllm_metax override, the override is being written AFTER
+    # the class was already resolved/cached (@cache on _cached_get_attn_backend);
+    # if this line is missing entirely, registration never ran in this process.
+    if not _ATTN_BACKENDS_REGISTERED:
+        _ATTN_BACKENDS_REGISTERED = True
+        # Use print(flush=True), not logger: prior rounds proved the platform
+        # logger can be swallowed by level/Ray capture (the version banner had
+        # to switch to print for the same reason). This must be visible so the
+        # next iteration can tell "registration ran + what it wrote" apart from
+        # "registration never ran in this process".
+        print(
+            "[metax-attn-reg] registered MLA backend overrides: "
+            f"FLASHMLA={_ATTN_OVERRIDES.get(AttentionBackendEnum.FLASHMLA)} "
+            f"FLASH_ATTN={_ATTN_OVERRIDES.get(AttentionBackendEnum.FLASH_ATTN)} "
+            f"FLASHMLA_SPARSE={_ATTN_OVERRIDES.get(AttentionBackendEnum.FLASHMLA_SPARSE)}",
+            flush=True,
+        )
 
 
 class MacaBackend(Backend):

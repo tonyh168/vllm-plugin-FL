@@ -255,6 +255,40 @@ class PlatformFL(Platform):
                 attention_config.use_trtllm_attention = False
                 attention_config.disable_flashinfer_prefill = True
 
+            # Register the MetaX MLA backend overrides EAGERLY here, at a
+            # per-process entry point that is guaranteed to run before any
+            # attention backend class is resolved. Previously registration was
+            # lazy (only inside MacaBackend.attention_backend(), reached via
+            # get_attn_backend_cls). For sparse MLA (FLASHMLA_SPARSE), the class
+            # is resolved by MLAAttention.__init__ -> get_attn_backend() ->
+            # @cache'd _cached_get_attn_backend; that path did NOT go through our
+            # dispatch, so _ATTN_OVERRIDES was still empty when FLASHMLA_SPARSE
+            # was resolved and it fell back to the upstream FlashMLASparseImpl
+            # (hard-requires vllm._flashmla_C, absent on MetaX -> crash). Writing
+            # the overrides here, before resolution + before the @cache fills,
+            # ensures get_path() returns vllm_metax's MacaFlashMLASparseBackend.
+            try:
+                from vllm_fl.dispatch.backends.vendor.metax.metax import (
+                    register_attention_backends,
+                )
+
+                register_attention_backends()
+                # print(flush=True) for the same reason as the version banner:
+                # guaranteed visible per process regardless of logger level /
+                # Ray capture. Confirms check_and_update_config ran the eager
+                # registration in THIS process (engine core + each Ray worker).
+                print(
+                    "[metax-attn-reg] eager registration done in "
+                    "check_and_update_config",
+                    flush=True,
+                )
+            except Exception as e:
+                print(
+                    "[metax-attn-reg] eager registration FAILED in "
+                    f"check_and_update_config: {e!r}",
+                    flush=True,
+                )
+
     @classmethod
     def get_attn_backend_cls(
         cls,
