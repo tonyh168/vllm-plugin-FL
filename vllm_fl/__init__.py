@@ -18,7 +18,16 @@ else:
         _torch.float4_e2m1fn_x2 = _torch.uint8
 del _torch
 
-from vllm_fl.utils import get_op_config as _get_op_config
+try:
+    from vllm_fl.utils import get_op_config as _get_op_config
+except ModuleNotFoundError as exc:
+    # The native GLM5-Next baseline reuses only this package's config/model
+    # modules and deliberately does not install or activate FlagGems.
+    if exc.name != "flag_gems":
+        raise
+
+    def _get_op_config():
+        return None
 
 from . import version as version  # PyTorch-style: vllm_fl.version.git_version
 
@@ -42,6 +51,14 @@ def _patch_transformers_compat():
         cfg.ALLOWED_LAYER_TYPES = getattr(
             cfg, "ALLOWED_ATTENTION_LAYER_TYPES", ()
         )
+    # transformers>=5.9 tightened `layer_types` validation against a fixed
+    # ALLOWED_LAYER_TYPES tuple that does not know GLM5-Next's DSA layer tag.
+    # PretrainedConfig.validate_layer_type reads this module global, so extend
+    # it in place instead of patching stock transformers (mirrors the NVIDIA
+    # transformers patch, which we do not ship on OOT accelerators).
+    for _lt in ("deepseek_sparse_attention",):
+        if _lt not in cfg.ALLOWED_LAYER_TYPES:
+            cfg.ALLOWED_LAYER_TYPES = tuple(cfg.ALLOWED_LAYER_TYPES) + (_lt,)
 
 
 def _register_flagcx_connector():
@@ -145,6 +162,15 @@ def register_model():
 
     apply_qwen3_5_text_patches()
     patch_vllm_moe_sum()
+
+    # Register the plugin-owned GLM5-Next runtime (config, arch convertor,
+    # kpool/DSA KV plumbing, mHC OOT dispatch). Self-gated on vLLM 0.24.
+    from vllm_fl.patches._version import is_vllm_024
+    if is_vllm_024():
+        from vllm_fl.patches.glm5_next_v024 import (
+            apply_glm5_next_v024_patches,
+        )
+        apply_glm5_next_v024_patches()
 
     _register_flagcx_connector()
 

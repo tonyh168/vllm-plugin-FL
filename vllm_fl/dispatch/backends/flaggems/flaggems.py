@@ -145,20 +145,38 @@ class FlagGemsBackend(Backend):
         Returns:
             Fully qualified class path string
         """
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        from vllm_fl.kernels.glm5_next.provider import use_nvidia_reference
 
-        # TritonAttentionBackend requires CUDA, check if available
+        if use_sparse and not use_mla:
+            raise ValueError("use_sparse=True requires use_mla=True.")
+
+        # Preserve the validated NVIDIA provider selection.  This backend is
+        # added only to remove CUDA-library dependencies from OOT accelerators;
+        # raising here lets the dispatch manager continue to the existing
+        # NVIDIA vendor backend when FlagGems is globally enabled.
+        if use_mla and current_platform.is_cuda() and use_nvidia_reference():
+            raise NotImplementedError(
+                "FlagGems portable MLA is reserved for non-NVIDIA platforms"
+            )
+
+        if use_mla and use_sparse:
+            return (
+                "vllm_fl.dispatch.backends.flaggems.impl.mla_sparse."
+                "FlagGemsSparseMLABackend"
+            )
+        if use_mla:
+            return "vllm_fl.dispatch.backends.flaggems.impl.mla.MLAFLBackend"
+
+        # The stock Triton attention backend is still CUDA-specific.  MLA is
+        # handled above by FlagGems implementations and must not be rejected by
+        # this CUDA availability probe on out-of-tree accelerators.
         if not torch.cuda.is_available():
             raise RuntimeError(
                 "TritonAttentionBackend requires CUDA but CUDA is not available. "
                 "Falling back to vendor implementation."
             )
-
-        if use_mla:
-            raise NotImplementedError("NOT support mla now!")
-
-        if use_sparse:
-            raise ValueError("use_sparse=True requires use_mla=True.")
 
         use_flaggems_attn = os.environ.get(
             "VLLM_FL_USE_FLAGGEMS_ATTN", "0"
