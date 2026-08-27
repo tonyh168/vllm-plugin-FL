@@ -167,19 +167,14 @@ def _load_flaggems_op(module: str, name: str) -> Callable | None:
                 )
         function = getattr(loaded, name)
         if module == "fp8_fp4_paged_mqa_logits":
-            required = ("_mqa_logits_kernel", "_select_block_kv", "triton")
-            if all(hasattr(loaded, attr) for attr in required):
-                logger.info_once(
-                    "Using graph-safe FlagGems paged-MQA wrapper without "
-                    "context_lens.max().item()"
-                )
-
-                def graph_safe_paged_mqa(*args, **kwargs):
-                    return _graph_safe_flaggems_paged_mqa_logits(
-                        loaded, *args, **kwargs
-                    )
-
-                return graph_safe_paged_mqa
+            # MetaX day0: FlagGems fp8_fp4_paged_mqa_logits has MLIR type error.
+            # Return None to signal "op unavailable" -> paged_mqa_logits() line 586
+            # falls back to _torch_paged_mqa_logits (pure PyTorch einsum).
+            logger.info_once(
+                "FlagGems fp8_fp4_paged_mqa_logits disabled for MetaX (MLIR "
+                "incompatibility); using PyTorch fallback"
+            )
+            return None
         return function
     except (ImportError, AttributeError, OSError) as exc:
         logger.debug("FlagGems GLM5-Next op %s is unavailable: %s", name, exc)
