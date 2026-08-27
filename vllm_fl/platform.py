@@ -334,6 +334,18 @@ class PlatformFL(Platform):
             "attention_backend", use_mla=use_mla, use_sparse=use_sparse
         )
 
+        # print(flush=True)取证:logger.info 会被 Ray/level 吞(版本 banner 同因)。
+        # 这条确认 get_attn_backend_cls 到底有没有被 sparse MLA 层调用、返回了什么。
+        # 若崩溃仍在上游 FlashMLASparseImpl 但这条显示 sparse->FlagGemsSparseMLABackend,
+        # 说明解析结果对但被 @cache 的旧值覆盖(解析发生在 cache_clear 之前);
+        # 若这条对 sparse 根本不出现,说明该层走了别的解析入口(未经本函数)。
+        print(
+            f"[metax-attn-sel] get_attn_backend_cls use_mla={use_mla} "
+            f"use_sparse={use_sparse} head_size={attn_selector_config.head_size} "
+            f"-> {backend_path}",
+            flush=True,
+        )
+
         logger.info_once(
             "Using attention backend via dispatch (use_mla=%s, use_sparse=%s): %s",
             use_mla,
