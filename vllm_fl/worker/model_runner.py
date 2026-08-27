@@ -7,6 +7,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -7177,6 +7178,15 @@ class ModelRunnerFL(
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
 
+        if os.getenv("VLLM_FL_DEBUG_KV_CACHE") == "1":
+            logger.warning(
+                "KV cache config before reshape: tensors=%s groups=%s "
+                "kernel_block_sizes=%s",
+                self.kv_cache_config.kv_cache_tensors,
+                self.kv_cache_config.kv_cache_groups,
+                kernel_block_sizes,
+            )
+
         # Map layer names to (offset, block_stride) within the packed
         # backing tensor so we can create strided views per layer.
         layer_packing: dict[str, tuple[int, int]] = {}
@@ -7204,15 +7214,27 @@ class ModelRunnerFL(
                     num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
-                    num_blocks_per_kv_block = (
-                        kv_cache_spec.block_size // kernel_block_size
-                    )
-                    kernel_num_blocks = num_blocks * num_blocks_per_kv_block
-
-                    # For MLA with compression, storage_block_size != block_size
                     if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-                        shape_block_size = kv_cache_spec.storage_block_size
+                        # Compressed index caches are addressed in storage
+                        # entries, not logical token slots. DeepGEMM accepts
+                        # 32/64-entry pages; split only the compressed storage
+                        # block and never multiply by logical block_size.
+                        storage_block_size = kv_cache_spec.storage_block_size
+                        shape_block_size = (
+                            64
+                            if storage_block_size % 64 == 0
+                            else 32
+                        )
+                        assert storage_block_size % shape_block_size == 0
+                        num_blocks_per_kv_block = (
+                            storage_block_size // shape_block_size
+                        )
+                        kernel_num_blocks = num_blocks * num_blocks_per_kv_block
                     else:
+                        num_blocks_per_kv_block = (
+                            kv_cache_spec.block_size // kernel_block_size
+                        )
+                        kernel_num_blocks = num_blocks * num_blocks_per_kv_block
                         shape_block_size = kernel_block_size
 
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
@@ -7222,15 +7244,58 @@ class ModelRunnerFL(
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
                     )
+                    if os.getenv("VLLM_FL_DEBUG_KV_CACHE") == "1":
+                        logger.warning(
+                            "KV cache reshape layer=%s spec=%s backend=%s "
+                            "raw_bytes=%d num_blocks=%d kernel_blocks=%d "
+                            "kernel_block_size=%d shape=%s packing=%s",
+                            layer_name,
+                            kv_cache_spec,
+                            attn_backend.__name__,
+                            raw_tensor.numel(),
+                            num_blocks,
+                            kernel_num_blocks,
+                            kernel_block_size,
+                            kv_cache_shape,
+                            packing,
+                        )
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
                     raw_tensor = kv_cache_raw_tensors[layer_name]
+                    # A padded logical cache block can be split into multiple
+                    # backend blocks (for example, GLM5-Next uses a 192-token
+                    # logical DSA indexer block and the indexer kernel consumes
+                    # 64-token blocks).  The upstream v0.24 helper applies the
+                    # complete logical-page stride to every backend block,
+                    # which makes the strided view run past the allocation.
+                    # Divide the physical page evenly across the backend blocks
+                    # so flattened kernel block ids retain a constant stride.
+                    reshape_spec = kv_cache_spec
+                    if (
+                        packing is None
+                        and kv_cache_spec.page_size_padded is not None
+                        and num_blocks_per_kv_block > 1
+                    ):
+                        assert (
+                            kv_cache_spec.page_size_bytes
+                            % num_blocks_per_kv_block
+                            == 0
+                        )
+                        reshape_spec = replace(
+                            kv_cache_spec,
+                            block_size=kernel_block_size,
+                            page_size_padded=(
+                                kv_cache_spec.page_size_bytes
+                                // num_blocks_per_kv_block
+                            ),
+                        )
+
                     kv_caches[layer_name] = _reshape_attention_kv_cache(
                         raw_tensor,
-                        kv_cache_spec,
+                        reshape_spec,
                         kv_cache_shape,
                         kv_cache_stride_order,
                         kernel_num_blocks,
