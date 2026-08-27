@@ -42,6 +42,12 @@ def _graph_safe_flaggems_paged_mqa_logits(
     CUDA graph capture.  Use the configured model length as the static launch
     bound; the kernel already exits tiles beyond each row's actual context.
     """
+    # MetaX day0: FlagGems fp8_fp4_paged_mqa_logits kernel has MLIR type error
+    # (i8 vs f32 in packLLEElements). Raise here to trigger PyTorch fallback.
+    raise NotImplementedError(
+        "FlagGems fp8_fp4_paged_mqa_logits disabled for MetaX (MLIR incompatibility)"
+    )
+
     del schedule_metadata
     q_values, _q_scale = q
     if q_values.dim() == 3:
