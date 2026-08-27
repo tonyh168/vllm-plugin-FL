@@ -33,9 +33,14 @@ op_backends:
   silu_and_mul:
     - flagos
     - reference
+  # rms_norm: FlagGems Triton layernorm kernel crashes at compile time on MetaX
+  # (layernorm.py:113 "PassManager::run failed", invalid rank-1 layout on a rank-2
+  # tensor). This is an MLIR-level abort, NOT a catchable Python exception, so the
+  # strict=false try-next fallback cannot recover from it — the whole worker dies.
+  # Force PyTorch reference first so the flagos kernel is never compiled on MetaX.
   rms_norm:
-    - flagos
     - reference
+    - flagos
   rotary_embedding:
     - flagos
     - reference
