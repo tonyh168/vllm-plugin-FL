@@ -43,25 +43,54 @@ def register_attention_backends():
         class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.flash_attn.MacaFlashAttentionBackend",
     )
     # FLASHMLA_SPARSE: GLM5.3-Flash uses sparse MLA (deepseek_sparse_attention,
-    # index_topk). Without a MetaX-specific registration, the sparse path falls
-    # through to vLLM upstream's flashmla_sparse.py, which hard-requires the
+    # index_topk). Without a registration, the sparse path falls through to vLLM
+    # upstream's flashmla_sparse.py FlashMLASparseImpl, which hard-requires the
     # compiled extension `vllm._flashmla_C` (absent on MetaX) and crashes with
-    # "vllm._flashmla_C is not available". The MetaX sparse kernel is provided by
-    # the `flash_mla` python package (flash_mla.flash_mla_interface.
-    # flash_mla_sparse_fwd), wired up by vllm_metax's MacaFlashMLASparseBackend.
-    # Reuse it directly instead of vendoring the full 2600+ line sparse stack
-    # (backend + indexer + sparse_swa), mirroring vllm_metax.platform.
+    # "vllm._flashmla_C is not available".
+    #
+    # IMPORTANT: target plugin-FL's OWN native sparse backend, NOT vllm_metax.
+    # vllm_metax is a SEPARATE platform plugin that is mutually exclusive with
+    # plugin-FL ("Only one platform plugin can be activated"); under
+    # VLLM_PLUGINS=fl it is not the active platform, so pointing the override at
+    # vllm_metax.MacaFlashMLASparseBackend is architecturally wrong. plugin-FL
+    # ships a native sparse MLA backend (FlagGemsSparseMLABackend) that supports
+    # head_size 576 (GLM5-Next), is_mla + is_sparse, and dispatches the sparse
+    # kernel through flag_gems.fused.flashmla_sparse.flash_mla_sparse_fwd — no
+    # `vllm._flashmla_C` dependency.
     register_backend(
         AttentionBackendEnum.FLASHMLA_SPARSE,
-        class_path="vllm_metax.v1.attention.backends.mla.flashmla_sparse.MacaFlashMLASparseBackend",
+        class_path="vllm_fl.dispatch.backends.flaggems.impl.mla_sparse.FlagGemsSparseMLABackend",
     )
+
+    # Defeat @cache poisoning on _cached_get_attn_backend: if the sparse MLA
+    # layer resolved its backend BEFORE this override was written (prior rounds
+    # crashed in upstream flashmla_sparse.py even though _ATTN_OVERRIDES showed
+    # our override — proof the class was resolved/cached first), the @cache holds
+    # the stale upstream class. Clearing it forces re-resolution through
+    # get_path() -> our override on the next get_attn_backend() call. Safe: the
+    # cache only memoizes the (backend, config, num_heads) -> class mapping.
+    try:
+        from vllm.v1.attention.selector import _cached_get_attn_backend
+
+        _cached_get_attn_backend.cache_clear()
+    except Exception as e:  # pragma: no cover - defensive
+        print(
+            f"[metax-attn-reg] cache_clear on _cached_get_attn_backend failed: {e!r}",
+            flush=True,
+        )
 
     # Log once per process what actually landed in _ATTN_OVERRIDES. This is the
     # ground truth the backend selector reads via AttentionBackendEnum.get_path()
-    # -> get_class(). If the crash reappears in upstream flashmla_sparse.py while
-    # this line shows the vllm_metax override, the override is being written AFTER
-    # the class was already resolved/cached (@cache on _cached_get_attn_backend);
-    # if this line is missing entirely, registration never ran in this process.
+    # -> get_class(). Interpretation for the next iteration:
+    #   - line missing entirely  -> registration never ran in this process.
+    #   - line shows FLASHMLA_SPARSE=...FlagGemsSparseMLABackend AND crash is gone
+    #     -> override + cache_clear worked.
+    #   - line shows our override but crash STILL in upstream flashmla_sparse.py
+    #     FlashMLASparseImpl -> resolution happened after cache_clear again
+    #     (some later code re-cached upstream) OR MLAAttention received an
+    #     explicit attn_backend= and bypassed get_attn_backend() entirely
+    #     (mla_attention.py:397 `if attn_backend is not None`). Next step then is
+    #     to trace the construction site, not the registry.
     if not _ATTN_BACKENDS_REGISTERED:
         _ATTN_BACKENDS_REGISTERED = True
         # Use print(flush=True), not logger: prior rounds proved the platform
