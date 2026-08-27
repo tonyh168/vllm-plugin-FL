@@ -69,7 +69,7 @@ import vllm_fl.envs as fl_envs
 
 from vllm_fl.ops.custom_ops import register_oot_ops
 from vllm_fl.dispatch.io_common import managed_inference_mode
-from vllm_fl.utils import get_flag_gems_whitelist_blacklist
+from vllm_fl.utils import get_flag_gems_whitelist_blacklist, log_plugin_fl_version
 
 logger = init_logger(__name__)
 
@@ -464,6 +464,11 @@ class WorkerFL(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        # Print the plugin-FL code version on every worker right before loading
+        # the checkpoint. In multi-node Ray runs this makes it trivial to spot a
+        # node running stale/divergent code: diff the "[plugin-FL version]" lines
+        # across ranks in the serve log. Prefixed with rank for easy grouping.
+        log_plugin_fl_version(logger=logger)
         ### TODO(lms): support manages a memory pool for device tensors.
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)

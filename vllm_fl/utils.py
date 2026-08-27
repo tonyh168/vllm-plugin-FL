@@ -339,5 +339,73 @@ def is_oot_enabled() -> bool:
     return enabled_str.lower() in ("1", "true")
 
 
+def log_plugin_fl_version(logger=None) -> str:
+    """Log the plugin-FL code version so each node/worker prints what it runs.
+
+    Multi-node Ray deployments mount / rsync the plugin-FL source per node.
+    When nodes silently diverge (one node not pulled, stale .pyc, wrong path),
+    a config/code fix "does not take effect" on some ranks and the failure is
+    baffling. Printing the git revision + source path + key mtime on every
+    worker right before checkpoint load makes divergence obvious at a glance:
+    just diff the version lines across ranks in the serve log.
+
+    Returns the one-line version string (also useful for assertions/tests).
+    """
+    import subprocess
+    import hashlib
+
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))  # .../vllm_fl
+    repo_dir = os.path.dirname(pkg_dir)                   # repo root
+
+    def _git(args):
+        try:
+            return subprocess.check_output(
+                ["git", "-C", repo_dir, *args],
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            ).decode().strip()
+        except Exception:
+            return "?"
+
+    rev = _git(["rev-parse", "--short", "HEAD"])
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    dirty = "dirty" if _git(["status", "--porcelain"]) else "clean"
+    subject = _git(["log", "-1", "--format=%s"])
+
+    # Content hash of the two files we actually edit for MetaX op routing, so
+    # even a non-git deploy (rsync of a checkout) still reveals stale copies.
+    fingerprint_files = [
+        os.path.join(pkg_dir, "dispatch", "config", "metax.yaml"),
+        os.path.join(pkg_dir, "worker", "worker.py"),
+    ]
+    h = hashlib.sha1()
+    for fp in fingerprint_files:
+        try:
+            with open(fp, "rb") as f:
+                h.update(f.read())
+        except Exception:
+            h.update(b"<missing>")
+    fp_hash = h.hexdigest()[:8]
+
+    # Effective FlagGems op routing, so "did the blacklist take effect" is
+    # answerable from this single line per rank.
+    try:
+        _wl, _bl = get_flag_gems_whitelist_blacklist()
+    except Exception:
+        _wl, _bl = None, None
+    blacklist_str = ",".join(_bl) if _bl else "(none)"
+
+    msg = (
+        f"[plugin-FL version] git={branch}@{rev}({dirty}) "
+        f"src={repo_dir} cfg+worker_sha1={fp_hash} "
+        f"flagos_blacklist=[{blacklist_str}] last_commit={subject!r}"
+    )
+    if logger is not None:
+        logger.info(msg)
+    else:
+        print(msg, flush=True)
+    return msg
+
+
 if __name__ == "__main__":
     device = DeviceInfo()
