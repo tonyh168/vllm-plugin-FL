@@ -50,6 +50,20 @@ class MacaFlashAttnPrefillBackend(FlashAttnPrefillBackend):
     that branch by forcing ``_is_vllm_fa = False``.
     """
 
+    # One-time debug latches (class-level so the log fires once per process,
+    # not once per layer/step). Grep `[glm53-mla-prefill]` in the serve log:
+    #   * "constructed"      -> the FLASH_ATTN override took effect and this
+    #                           backend was instantiated during model build.
+    #   * "run_prefill ..."  -> this prefill path is ACTUALLY executed at
+    #                           runtime. Its ABSENCE (while the model still
+    #                           runs) confirms sparse MLA handles prefill
+    #                           inside FlashMLASparseBackend and prefill_backend
+    #                           is dead weight -- the open question flagged in
+    #                           the migration log.
+    _logged_construct = False
+    _logged_new_tokens = False
+    _logged_ctx_chunk = False
+
     @classmethod
     def is_available(cls) -> bool:
         try:
@@ -79,6 +93,33 @@ class MacaFlashAttnPrefillBackend(FlashAttnPrefillBackend):
         self.vllm_flash_attn_version = None
         self.requires_v_padding = True
         self._is_vllm_fa = False
+
+        if not MacaFlashAttnPrefillBackend._logged_construct:
+            MacaFlashAttnPrefillBackend._logged_construct = True
+            logger.info(
+                "[glm53-mla-prefill] constructed MacaFlashAttnPrefillBackend "
+                "(standalone flash_attn, requires_v_padding=%s, _is_vllm_fa=%s)",
+                self.requires_v_padding,
+                self._is_vllm_fa,
+            )
+
+    def run_prefill_new_tokens(self, *args, **kwargs):
+        if not MacaFlashAttnPrefillBackend._logged_new_tokens:
+            MacaFlashAttnPrefillBackend._logged_new_tokens = True
+            logger.info(
+                "[glm53-mla-prefill] run_prefill_new_tokens invoked -- this "
+                "prefill path IS live on MetaX"
+            )
+        return super().run_prefill_new_tokens(*args, **kwargs)
+
+    def run_prefill_context_chunk(self, *args, **kwargs):
+        if not MacaFlashAttnPrefillBackend._logged_ctx_chunk:
+            MacaFlashAttnPrefillBackend._logged_ctx_chunk = True
+            logger.info(
+                "[glm53-mla-prefill] run_prefill_context_chunk invoked "
+                "(chunked prefill context path IS live on MetaX)"
+            )
+        return super().run_prefill_context_chunk(*args, **kwargs)
 
 
 def install_glm5_next_mla_prefill_backend() -> bool:
