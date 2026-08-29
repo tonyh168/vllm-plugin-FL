@@ -440,6 +440,41 @@ def _patch_bf16_paged_mqa_logits_debug() -> None:
                 # MISMATCH. Its job (confirming the round-12/13 dirty-metadata root
                 # cause) is done; keeping it now only misleads. The VALUES dump
                 # above still shows the actual passed-in schedule_metadata content.
+
+                # --- Phase 1c: KV cache content probe (方案1) ---
+                # Hypothesis: prefill writes KV to block#0, but decode reads from
+                # block#1 (address mismatch). Directly inspect the first few slots
+                # of block#0 and block#1 to see which one contains non-zero data.
+                # If block#0 has data but block#1 is zeros -> mismatch confirmed.
+                # If block#1 has data -> prefill did write to block#1, need to
+                # verify prefill's block_table matches decode's.
+                try:
+                    if kv_cache_bf16.ndim >= 3 and num_blocks is not None and num_blocks >= 2:
+                        # kv_cache shape: (num_blocks, block_size, 1, D)
+                        # Read first 5 tokens (slots 0-4) of blocks 0 and 1, sample first 10 dims
+                        block0_sample = kv_cache_bf16[0, :5, 0, :10]  # (5, 10)
+                        block1_sample = kv_cache_bf16[1, :5, 0, :10]
+                        b0_norm = float(block0_sample.norm().item())
+                        b0_min = float(block0_sample.min().item())
+                        b0_max = float(block0_sample.max().item())
+                        b0_nonzero = int((block0_sample.abs() > 1e-6).sum().item())
+                        b1_norm = float(block1_sample.norm().item())
+                        b1_min = float(block1_sample.min().item())
+                        b1_max = float(block1_sample.max().item())
+                        b1_nonzero = int((block1_sample.abs() > 1e-6).sum().item())
+                        logger.warning(
+                            "[hy4-kv-probe] block#0[:5,:10] norm=%.4f min=%.4f "
+                            "max=%.4f nonzero=%s/50 | block#1[:5,:10] norm=%.4f "
+                            "min=%.4f max=%.4f nonzero=%s/50 | "
+                            "VERDICT: %s",
+                            b0_norm, b0_min, b0_max, b0_nonzero,
+                            b1_norm, b1_min, b1_max, b1_nonzero,
+                            "block#0_has_data" if b0_nonzero > 10 else (
+                                "block#1_has_data" if b1_nonzero > 10 else "both_zero_or_tiny"
+                            ),
+                        )
+                except Exception as kv_probe_e:
+                    logger.warning(f"[hy4-kv-probe] failed: {kv_probe_e}")
             except Exception as le:
                 logger.warning(f"[hy4-paged-mqa] debug logging failed: {le}")
         return _orig(q_bf16, kv_cache_bf16, weights, context_lens, block_tables,
