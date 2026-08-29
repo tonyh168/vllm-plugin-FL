@@ -520,17 +520,20 @@ def _patch_bf16_paged_mqa_logits_debug() -> None:
 
 
 def _patch_sparse_attn_indexer_for_maca() -> None:
-    """Patch SparseAttnIndexer.forward_native to use MetaX kernels.
+    """Patch SparseAttnIndexer.forward_native to use PyTorch BF16 indexer.
+
+    Phase 1c: Replace MetaX C++ kernel (torch.ops.vllm.mx_sparse_attn_indexer_bf16
+    + bf16_paged_mqa_logits) with hygon's pure PyTorch PPUBF16SparseAttnIndexer.
+    The C++ kernel has paged KV address mapping issues (block#1 has data but
+    output still repeats), so we use the portable PyTorch reference impl that
+    works on hygon/thead as a validation baseline.
 
     The upstream forward_cuda calls NVIDIA-only C++ ops
     (indexer_k_quant_and_cache with fp8_e4m3, DeepGEMM fp8_mqa_logits, etc.)
-    that are not available on MACA. MetaX provides equivalent ops via
-    torch.ops.vllm.mx_sparse_attn_indexer which handles bf16 keys natively
-    and uses MACA-compiled kernels for cache, logits, and top-k.
+    that are not available on MACA.
     """
     import torch
     from vllm.platforms import current_platform
-    from vllm.utils.torch_utils import _encode_layer_name
 
     if current_platform.is_cuda():
         return  # real NVIDIA, no patch needed
@@ -539,175 +542,169 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
         from vllm.model_executor.layers.sparse_attn_indexer import (
             SparseAttnIndexer,
         )
+        from vllm_fl.models.hy_v4_indexer import PPUBF16SparseAttnIndexer
 
-        if not _register_mx_sparse_attn_indexer_op():
-            logger.warning(
-                "Failed to register mx_sparse_attn_indexer op; "
-                "SparseAttnIndexer will not work on MACA"
-            )
-            return
+        # ===== DISABLED: MetaX C++ kernel path =====
+        # This was the original MetaX integration using compiled kernels:
+        # torch.ops.vllm.mx_sparse_attn_indexer_bf16, bf16_paged_mqa_logits, etc.
+        # Disabled due to paged KV address mapping issues (Phase 1c result:
+        # block#1 has data but decode still repeats input last token).
+        # Keeping the code for future reference or if MetaX fixes the kernel.
+        #
+        # if not _register_mx_sparse_attn_indexer_op():
+        #     logger.warning(
+        #         "Failed to register mx_sparse_attn_indexer op; "
+        #         "SparseAttnIndexer will not work on MACA"
+        #     )
+        #     return
+        # ===== END DISABLED =====
 
         _orig_forward_native = SparseAttnIndexer.forward_native
+        _orig_init = SparseAttnIndexer.__init__
 
-        def _forward_native_maca(self, hidden_states, q_quant, k, weights):
+        def _patched_init(self, *args, **kwargs):
+            _orig_init(self, *args, **kwargs)
+            # Instantiate the PyTorch indexer as a fallback/reference impl
+            # It needs: head_dim, topk_tokens, cache_config, topk_indices_buffer,
+            # prefix, max_model_len — all available in SparseAttnIndexer
+            try:
+                self._pytorch_indexer = PPUBF16SparseAttnIndexer(
+                    head_dim=self.head_dim,
+                    topk_tokens=self.topk_tokens,
+                    cache_config=self.k_cache.cache_config if hasattr(self.k_cache, 'cache_config') else None,
+                    topk_indices_buffer=self.topk_indices_buffer,
+                    prefix=self.k_cache.prefix,
+                    max_model_len=self.max_model_len,
+                )
+                logger.warning(
+                    "[hy4-indexer-pytorch] Initialized PPUBF16SparseAttnIndexer "
+                    "(hygon ref impl) for layer %s", self.k_cache.prefix
+                )
+            except Exception as e:
+                logger.warning(
+                    "[hy4-indexer-pytorch] Failed to init PyTorch indexer: %s. "
+                    "Will fall back to original forward_native.", e
+                )
+                self._pytorch_indexer = None
+
+        def _forward_native_pytorch(self, hidden_states, q_quant, k, weights):
+            """Use pure PyTorch indexer (hygon's PPUBF16SparseAttnIndexer)."""
             if not current_platform.is_cuda_alike():
                 return _orig_forward_native(
                     self, hidden_states, q_quant, k, weights
                 )
 
-            # MACA only has bf16_mqa_logits — always use bf16 op
-            if isinstance(q_quant, tuple):
-                q_values, q_scale = q_quant
-            else:
-                q_values, q_scale = q_quant, None
-
-            if q_values.dtype not in (torch.bfloat16, torch.float16):
-                q_values = q_values.to(torch.bfloat16)
-                q_scale = None
-
-            # One-shot debug: dump the exact shapes/dtypes handed to the bf16
-            # MQA-logits kernel. deep_gemm/bf16_attention.py:366 asserts
-            # ``kv_heads == 1 and kv_dim == head_dim``; the kv_cache last dim
-            # (kv_dim) must equal self.head_dim (no packed fp8 scale). This log
-            # tells us at a glance whether the cache layout fix took effect and,
-            # if the assert still fires, which half fails. Gated on a per-op
-            # class attr so it prints once (prefill + decode) not every step.
-            if not getattr(SparseAttnIndexer, "_mx_bf16_shape_logged", False):
-                kv = self.k_cache.kv_cache
-                # WARNING: INFO is filtered for this logger in the deployment.
-                logger.warning(
-                    "[hy4-indexer-bf16] q_values=%s/%s k=%s/%s kv_cache=%s/%s "
-                    "head_dim=%s quant_block_size=%s scale_fmt=%s topk=%s "
-                    "q_scale=%s skip_k_cache_insert=%s use_fp4_cache=%s | "
-                    "expect kv_cache last dim == head_dim (%s)",
-                    tuple(q_values.shape), q_values.dtype,
-                    tuple(k.shape) if k is not None else None,
-                    k.dtype if k is not None else None,
-                    tuple(kv.shape), kv.dtype,
-                    self.head_dim, self.quant_block_size, self.scale_fmt,
-                    self.topk_tokens,
-                    None if q_scale is None else (tuple(q_scale.shape), q_scale.dtype),
-                    self.skip_k_cache_insert, self.use_fp4_cache,
-                    self.head_dim,
+            # If PyTorch indexer failed to init, fall back
+            if not hasattr(self, '_pytorch_indexer') or self._pytorch_indexer is None:
+                logger.warning_once(
+                    "[hy4-indexer-pytorch] PyTorch indexer not available, "
+                    "falling back to original forward_native"
                 )
-                if kv.ndim >= 1 and kv.shape[-1] != self.head_dim:
-                    logger.warning(
-                        "[hy4-indexer-bf16] kv_cache last dim %s != head_dim %s "
-                        "-> bf16_paged_mqa_logits assert kv_dim==head_dim WILL "
-                        "fail. Cache built with fp8-packed width? Check "
-                        "hy_v4_attention.py Indexer k_cache layout.",
-                        kv.shape[-1], self.head_dim,
-                    )
-                SparseAttnIndexer._mx_bf16_shape_logged = True
+                return _orig_forward_native(
+                    self, hidden_states, q_quant, k, weights
+                )
 
-            topk_indices = torch.ops.vllm.mx_sparse_attn_indexer_bf16(
-                hidden_states,
-                _encode_layer_name(self.k_cache.prefix),
-                self.k_cache.kv_cache,
-                q_values,
-                q_scale,
-                k,
-                weights,
-                self.quant_block_size,
-                self.scale_fmt,
-                self.topk_tokens,
-                self.head_dim,
-                self.max_model_len,
-                self.max_total_seq_len,
-                self.topk_indices_buffer,
-                self.skip_k_cache_insert,
-                self.use_fp4_cache,
+            # PPUBF16SparseAttnIndexer.forward signature:
+            # forward(hidden_states, attn_metadata, k, weights) -> topk_indices
+            # It expects attn_metadata from get_forward_context()
+            from vllm.v1.worker.gpu_model_runner import get_forward_context
+            ctx = get_forward_context()
+            attn_metadata = getattr(ctx, 'attn_metadata', None)
+            if attn_metadata is None:
+                logger.warning_once(
+                    "[hy4-indexer-pytorch] No attn_metadata in forward_context, "
+                    "cannot use PyTorch indexer (needs cache ops). Fallback."
+                )
+                return _orig_forward_native(
+                    self, hidden_states, q_quant, k, weights
+                )
+
+            # Call PyTorch indexer
+            topk_indices = self._pytorch_indexer.forward(
+                hidden_states, attn_metadata, k, weights
             )
-
-            # Diagnose the "model repeats the last input token" garbage output
-            # (log round 17). Symptom == attention aggregates ~nothing, which for
-            # a DSA sparse model usually means the indexer's top-k selection is
-            # broken (all -1 / all same pos / uninitialised), so attention only
-            # ever sees one token.
-            #
-            # Round 20 subagent finding: the PREVIOUS gate ("first 4 calls") got
-            # consumed entirely by the profiling / _dummy_run passes, where
-            # get_forward_context().attn_metadata is NOT a dict. In that case the
-            # metax op takes the fake/profiling branch (bf16.py:58) and returns
-            # the uninitialised torch.empty buffer verbatim (bf16.py:244) — no -1
-            # fill, no top-k. That is exactly the "huge +/- ints, neg1_count=0"
-            # garbage we saw; it was a MEASUREMENT ARTIFACT of dummy runs, not a
-            # real-inference bug. A REAL prefill always writes -1 first
-            # (bf16.py:107) + pads short rows with -1, so real dumps must show a
-            # LARGE neg1_count.
-            #
-            # New gate: only count/dump calls where attn_metadata is a real dict
-            # (i.e. actual inference steps), and log the branch discriminator so
-            # we can separate:
-            #   H1 -> real steps DO run the real op (md_is_dict=True, sane spread
-            #         + partial -1) => indexer is fine, bug is downstream
-            #         (FlashMLA sparse decode / MLA aggregation).
-            #   H2 -> even real steps see md_is_dict=False or prefix not in md
-            #         keys => op keeps hitting the fake branch => real bug here.
-            # Interpretation of the dumped indices when md_is_dict=True:
-            #   sane spread + partial -1 -> top-k fine, look downstream
-            #   all -1                   -> indexer selected no KV -> repeats
-            #   all 0 / one pos          -> selection collapsed to a single pos
-            #   huge +/- ints (neg1=0)   -> fake branch STILL taken (=> H2)
-            try:
-                _fc = get_forward_context()
-                _md = getattr(_fc, "attn_metadata", None)
-                _md_is_dict = isinstance(_md, dict)
-                _enc_prefix = _encode_layer_name(self.k_cache.prefix)
-                _prefix_in_md = bool(_md_is_dict and _enc_prefix in _md)
-            except Exception:
-                _md = None
-                _md_is_dict = False
-                _enc_prefix = None
-                _prefix_in_md = False
-
-            _n = getattr(SparseAttnIndexer, "_mx_topk_dump_count", 0)
-            # Only spend the dump budget on REAL steps (attn_metadata is a dict).
-            if _md_is_dict and _n < 6:
-                SparseAttnIndexer._mx_topk_dump_count = _n + 1
-                try:
-                    ti = topk_indices
-                    rows = min(3, ti.shape[0])
-                    cols = min(12, ti.shape[-1])
-                    sample = ti[:rows, :cols].detach().cpu().tolist()
-                    flat = ti.detach().reshape(-1)
-                    n_neg1 = int((flat == -1).sum().item())
-                    logger.warning(
-                        "[hy4-topk] REAL-STEP md_is_dict=%s prefix_in_md=%s "
-                        "enc_prefix=%s md_type=%s md_keys=%s | shape=%s dtype=%s | "
-                        "per-row[:%d,:%d]=%s | min=%s max=%s numel=%s "
-                        "neg1_count=%s (%.1f%%) | phase=%s(q_rows=%s topk_tokens=%s)",
-                        _md_is_dict, _prefix_in_md, _enc_prefix,
-                        type(_md).__name__,
-                        (list(_md.keys())[:4] if _md_is_dict else None),
-                        tuple(ti.shape), ti.dtype, rows, cols, sample,
-                        int(flat.min().item()), int(flat.max().item()),
-                        flat.numel(), n_neg1,
-                        100.0 * n_neg1 / max(1, flat.numel()),
-                        "prefill" if q_values.shape[0] > 1 else "decode",
-                        q_values.shape[0], self.topk_tokens,
-                    )
-                except Exception as te:
-                    logger.warning("[hy4-topk] dump failed: %s", te)
-            elif not _md_is_dict:
-                # Fake/profiling branch — log once so we can confirm dummy runs
-                # are being correctly skipped (and never counted against budget).
-                if not getattr(SparseAttnIndexer, "_mx_topk_fake_logged", False):
-                    SparseAttnIndexer._mx_topk_fake_logged = True
-                    logger.warning(
-                        "[hy4-topk] SKIP fake/profiling call: attn_metadata "
-                        "type=%s (not dict) -> metax op returns uninitialised "
-                        "buffer; not counted. enc_prefix=%s",
-                        type(_md).__name__, _enc_prefix,
-                    )
 
             return topk_indices
 
-        SparseAttnIndexer.forward_native = _forward_native_maca
-        logger.info(
-            "Patched SparseAttnIndexer.forward_native to use MetaX "
-            "mx_sparse_attn_indexer op"
+        # ===== DISABLED: MetaX kernel forward path =====
+        # def _forward_native_maca(self, hidden_states, q_quant, k, weights):
+        #     if not current_platform.is_cuda_alike():
+        #         return _orig_forward_native(
+        #             self, hidden_states, q_quant, k, weights
+        #         )
+        #
+        #     # MACA only has bf16_mqa_logits — always use bf16 op
+        #     if isinstance(q_quant, tuple):
+        #         q_values, q_scale = q_quant
+        #     else:
+        #         q_values, q_scale = q_quant, None
+        #
+        #     if q_values.dtype not in (torch.bfloat16, torch.float16):
+        #         q_values = q_values.to(torch.bfloat16)
+        #         q_scale = None
+        #
+        #     # One-shot debug: dump the exact shapes/dtypes handed to the bf16
+        #     # MQA-logits kernel. deep_gemm/bf16_attention.py:366 asserts
+        #     # ``kv_heads == 1 and kv_dim == head_dim``; the kv_cache last dim
+        #     # (kv_dim) must equal self.head_dim (no packed fp8 scale). This log
+        #     # tells us at a glance whether the cache layout fix took effect and,
+        #     # if the assert still fires, which half fails. Gated on a per-op
+        #     # class attr so it prints once (prefill + decode) not every step.
+        #     if not getattr(SparseAttnIndexer, "_mx_bf16_shape_logged", False):
+        #         kv = self.k_cache.kv_cache
+        #         # WARNING: INFO is filtered for this logger in the deployment.
+        #         logger.warning(
+        #             "[hy4-indexer-bf16] q_values=%s/%s k=%s/%s kv_cache=%s/%s "
+        #             "head_dim=%s quant_block_size=%s scale_fmt=%s topk=%s "
+        #             "q_scale=%s skip_k_cache_insert=%s use_fp4_cache=%s | "
+        #             "expect kv_cache last dim == head_dim (%s)",
+        #             tuple(q_values.shape), q_values.dtype,
+        #             tuple(k.shape) if k is not None else None,
+        #             k.dtype if k is not None else None,
+        #             tuple(kv.shape), kv.dtype,
+        #             self.head_dim, self.quant_block_size, self.scale_fmt,
+        #             self.topk_tokens,
+        #             None if q_scale is None else (tuple(q_scale.shape), q_scale.dtype),
+        #             self.skip_k_cache_insert, self.use_fp4_cache,
+        #             self.head_dim,
+        #         )
+        #         if kv.ndim >= 1 and kv.shape[-1] != self.head_dim:
+        #             logger.warning(
+        #                 "[hy4-indexer-bf16] kv_cache last dim %s != head_dim %s "
+        #                 "-> bf16_paged_mqa_logits assert kv_dim==head_dim WILL "
+        #                 "fail. Cache built with fp8-packed width? Check "
+        #                 "hy_v4_attention.py Indexer k_cache layout.",
+        #                 kv.shape[-1], self.head_dim,
+        #             )
+        #         SparseAttnIndexer._mx_bf16_shape_logged = True
+        #
+        #     topk_indices = torch.ops.vllm.mx_sparse_attn_indexer_bf16(
+        #         hidden_states,
+        #         _encode_layer_name(self.k_cache.prefix),
+        #         self.k_cache.kv_cache,
+        #         q_values,
+        #         q_scale,
+        #         k,
+        #         weights,
+        #         self.quant_block_size,
+        #         self.scale_fmt,
+        #         self.topk_tokens,
+        #         self.head_dim,
+        #         self.max_model_len,
+        #         self.max_total_seq_len,
+        #         self.topk_indices_buffer,
+        #         self.skip_k_cache_insert,
+        #         self.use_fp4_cache,
+        #     )
+        # ===== END DISABLED =====
+
+        SparseAttnIndexer.__init__ = _patched_init
+        SparseAttnIndexer.forward_native = _forward_native_pytorch
+        logger.warning(
+            "[hy4-indexer-pytorch] Patched SparseAttnIndexer to use PyTorch "
+            "BF16 indexer (hygon ref impl) instead of MetaX C++ kernels"
         )
+
     except Exception as e:
         logger.warning(f"Failed to patch SparseAttnIndexer: {e}")
 
