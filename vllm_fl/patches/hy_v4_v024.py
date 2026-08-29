@@ -813,14 +813,34 @@ def _patch_flashmla_sparse_for_metax() -> None:
                     n = getattr(FlashMLASparseImpl, "_hy4_cv_dbg_n", 0)
                     if n < 4:
                         try:
+                            import torch as _t
+                            # Round 24e: decisive H1 (write/read race) test. Read
+                            # the SAME buffer slice twice: (1) NO sync — how the
+                            # downstream triton kernel actually sees it; (2) after
+                            # an explicit device sync — the settled value. If (1)
+                            # is [1,0,1,0] but (2) becomes [1,2,3,4], the indexer
+                            # write is not ordered before this read on MetaX =>
+                            # race confirmed, fix = barrier the indexer op.
                             in2d = topk_indices.reshape(topk_indices.shape[0], -1)
-                            in_valid = (in2d >= 0).sum(dim=1)
+                            valid_nosync = (in2d >= 0).sum(dim=1)[:6].tolist()
+                            if _t.cuda.is_available():
+                                _t.cuda.synchronize()
+                            valid_synced = (
+                                (topk_indices.reshape(topk_indices.shape[0], -1) >= 0)
+                                .sum(dim=1)[:6].tolist()
+                            )
+                            # also snapshot first row's first 12 cols post-sync
+                            row_sample = (
+                                topk_indices.reshape(topk_indices.shape[0], -1)[:2, :12]
+                                .detach().cpu().tolist()
+                            )
                             logger.warning(
                                 "[hy4-convert] BEFORE topk_indices=%s "
-                                "valid_per_row[:6]=%s min=%s max=%s | "
+                                "valid_NOSYNC[:6]=%s valid_SYNCED[:6]=%s "
+                                "row_sample[:2,:12]=%s min=%s max=%s | "
                                 "req_id_per_token=%s block_table=%s block_size=%s",
                                 tuple(topk_indices.shape),
-                                in_valid[:6].tolist(),
+                                valid_nosync, valid_synced, row_sample,
                                 int(in2d.min().item()), int(in2d.max().item()),
                                 tuple(attn_metadata.req_id_per_token.shape),
                                 tuple(attn_metadata.block_table.shape),
