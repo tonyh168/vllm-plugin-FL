@@ -494,13 +494,51 @@ class HYV4Model(nn.Module):
                 self.config.hidden_size,
             )
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        # Round 24b: trace the multi-stream residual across layers. L0 attention
+        # was verified healthy, so the garbage is either accumulating across
+        # layers or in the hc_head merge / final norm. Only on real steps, capped.
+        _dbg = False
+        try:
+            from vllm.forward_context import get_forward_context
+            _dbg = (
+                isinstance(getattr(get_forward_context(), "attn_metadata", None), dict)
+                and getattr(HYV4Model, "_hy4_fwd_dbg_n", 0) < 4
+            )
+        except Exception:
+            _dbg = False
+        if _dbg:
+            HYV4Model._hy4_fwd_dbg_n = getattr(HYV4Model, "_hy4_fwd_dbg_n", 0) + 1
+
+        def _dbg_stream(tag, s):
+            if not _dbg:
+                return
+            try:
+                f = s.detach().float().reshape(-1)
+                lt = s.detach().float().reshape(s.shape[0], -1)[-1].norm().item()
+                logger.warning(
+                    "[hy4-fwd] %s shape=%s norm=%.4f mean=%.4e std=%.4e "
+                    "min=%.4e max=%.4e nan=%s inf=%s last_tok_norm=%.4f",
+                    tag, tuple(s.shape), float(f.norm()), float(f.mean()),
+                    float(f.std()), float(f.min()), float(f.max()),
+                    bool(f.isnan().any()), bool(f.isinf().any()), float(lt),
+                )
+            except Exception as e:
+                logger.warning("[hy4-fwd] %s failed: %s", tag, e)
+
+        _dbg_stream(f"streams.in (start_layer={self.start_layer})", streams)
+        for _i, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
             streams = layer(positions, streams)
+            if _dbg and (self.start_layer + _i) in (0, 1, self.end_layer - 1):
+                _dbg_stream(f"streams after layer {self.start_layer + _i}", streams)
 
         if not get_pp_group().is_last_rank:
+            _dbg_stream("streams.out (-> next PP)", streams)
             return IntermediateTensors({"streams": streams.flatten(1)})
         hidden_states = self.hc_head(streams)
-        return self.norm(hidden_states)
+        _dbg_stream("hc_head out", hidden_states)
+        normed = self.norm(hidden_states)
+        _dbg_stream("final norm out", normed)
+        return normed
 
 
 class HYV4LogitsProcessor(LogitsProcessor):
@@ -521,6 +559,31 @@ class HYV4LogitsProcessor(LogitsProcessor):
         logits = self._gather_logits(logits)
         if logits is not None:
             logits = logits[..., : self.org_vocab_size]
+        # Round 24b: dump the last-token logits argmax to see if lm_head maps the
+        # final hidden to the repeated token (garbage) vs a sane distribution.
+        try:
+            from vllm.forward_context import get_forward_context
+            if (isinstance(getattr(get_forward_context(), "attn_metadata", None), dict)
+                    and getattr(HYV4ForCausalLM, "_hy4_logit_dbg_n", 0) < 4
+                    and logits is not None):
+                HYV4ForCausalLM._hy4_logit_dbg_n = getattr(
+                    HYV4ForCausalLM, "_hy4_logit_dbg_n", 0) + 1
+                lg = logits.detach().float()
+                last = lg[-1]
+                top = last.topk(min(5, last.numel()))
+                logger.warning(
+                    "[hy4-logits] in_hidden_norm=%.4f logits shape=%s | "
+                    "last_tok top5 ids=%s vals=%s | logit min=%.3f max=%.3f "
+                    "nan=%s inf=%s",
+                    float(hidden_states.detach().float().reshape(
+                        hidden_states.shape[0], -1)[-1].norm()),
+                    tuple(logits.shape), top.indices.tolist(),
+                    [round(v, 3) for v in top.values.tolist()],
+                    float(last.min()), float(last.max()),
+                    bool(lg.isnan().any()), bool(lg.isinf().any()),
+                )
+        except Exception as _e:
+            logger.warning("[hy4-logits] dump failed: %s", _e)
         return logits
 
 

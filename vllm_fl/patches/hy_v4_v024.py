@@ -736,7 +736,7 @@ def _patch_flashmla_sparse_for_metax() -> None:
             if n < 6:
                 _maca_flash_mla_sparse_fwd._dbg_n = n + 1
                 try:
-                    o = out[0] if isinstance(out, tuple) else out
+                    o = out[0] if isinstance(out, (tuple, list)) else out
                     # per-row valid index count (indices: [s_q, 1, topk])
                     idx2d = indices.reshape(indices.shape[0], -1)
                     valid_per_row = (idx2d >= 0).sum(dim=1)
