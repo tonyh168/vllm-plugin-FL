@@ -620,7 +620,7 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
             # PPUBF16SparseAttnIndexer.forward signature:
             # forward(hidden_states, q, k, weights) -> topk_indices
             # It expects attn_metadata from get_forward_context()
-            from vllm.v1.worker.gpu_model_runner import get_forward_context
+            # (imported at module level from vllm.forward_context)
             ctx = get_forward_context()
             attn_metadata = getattr(ctx, 'attn_metadata', None)
             if attn_metadata is None:
