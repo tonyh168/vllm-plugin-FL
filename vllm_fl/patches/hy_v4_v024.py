@@ -16,6 +16,8 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     ModelArchConfigConvertorBase,
 )
 
+from vllm.forward_context import get_forward_context
+
 from vllm_fl.configs.hy_v4 import HYV4Config
 from vllm_fl.model_loader.hy_v4_loader import HYV4SafetensorsLoader
 from vllm_fl.patches._version import is_vllm_024
@@ -586,15 +588,47 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
             # (log round 17). Symptom == attention aggregates ~nothing, which for
             # a DSA sparse model usually means the indexer's top-k selection is
             # broken (all -1 / all same pos / uninitialised), so attention only
-            # ever sees one token. Dump the ACTUAL selected indices for the first
-            # few query rows so we can tell which failure mode this is:
-            #   all -1         -> indexer selected no KV (empty) -> repeats
-            #   all 0 / one pos -> selection collapsed to a single position
-            #   huge +/- ints   -> buffer uninitialised (like schedule_metadata was)
-            #   sane spread     -> top-k is fine, look at logits/weighting/MLA next
-            # Gated to print a handful of times (prefill + first decode steps).
+            # ever sees one token.
+            #
+            # Round 20 subagent finding: the PREVIOUS gate ("first 4 calls") got
+            # consumed entirely by the profiling / _dummy_run passes, where
+            # get_forward_context().attn_metadata is NOT a dict. In that case the
+            # metax op takes the fake/profiling branch (bf16.py:58) and returns
+            # the uninitialised torch.empty buffer verbatim (bf16.py:244) — no -1
+            # fill, no top-k. That is exactly the "huge +/- ints, neg1_count=0"
+            # garbage we saw; it was a MEASUREMENT ARTIFACT of dummy runs, not a
+            # real-inference bug. A REAL prefill always writes -1 first
+            # (bf16.py:107) + pads short rows with -1, so real dumps must show a
+            # LARGE neg1_count.
+            #
+            # New gate: only count/dump calls where attn_metadata is a real dict
+            # (i.e. actual inference steps), and log the branch discriminator so
+            # we can separate:
+            #   H1 -> real steps DO run the real op (md_is_dict=True, sane spread
+            #         + partial -1) => indexer is fine, bug is downstream
+            #         (FlashMLA sparse decode / MLA aggregation).
+            #   H2 -> even real steps see md_is_dict=False or prefix not in md
+            #         keys => op keeps hitting the fake branch => real bug here.
+            # Interpretation of the dumped indices when md_is_dict=True:
+            #   sane spread + partial -1 -> top-k fine, look downstream
+            #   all -1                   -> indexer selected no KV -> repeats
+            #   all 0 / one pos          -> selection collapsed to a single pos
+            #   huge +/- ints (neg1=0)   -> fake branch STILL taken (=> H2)
+            try:
+                _fc = get_forward_context()
+                _md = getattr(_fc, "attn_metadata", None)
+                _md_is_dict = isinstance(_md, dict)
+                _enc_prefix = _encode_layer_name(self.k_cache.prefix)
+                _prefix_in_md = bool(_md_is_dict and _enc_prefix in _md)
+            except Exception:
+                _md = None
+                _md_is_dict = False
+                _enc_prefix = None
+                _prefix_in_md = False
+
             _n = getattr(SparseAttnIndexer, "_mx_topk_dump_count", 0)
-            if _n < 4:
+            # Only spend the dump budget on REAL steps (attn_metadata is a dict).
+            if _md_is_dict and _n < 6:
                 SparseAttnIndexer._mx_topk_dump_count = _n + 1
                 try:
                     ti = topk_indices
@@ -604,9 +638,13 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                     flat = ti.detach().reshape(-1)
                     n_neg1 = int((flat == -1).sum().item())
                     logger.warning(
-                        "[hy4-topk] shape=%s dtype=%s | per-row[:%d,:%d]=%s | "
-                        "min=%s max=%s numel=%s neg1_count=%s (%.1f%%) | "
-                        "phase=%s(q_rows=%s topk_tokens=%s)",
+                        "[hy4-topk] REAL-STEP md_is_dict=%s prefix_in_md=%s "
+                        "enc_prefix=%s md_type=%s md_keys=%s | shape=%s dtype=%s | "
+                        "per-row[:%d,:%d]=%s | min=%s max=%s numel=%s "
+                        "neg1_count=%s (%.1f%%) | phase=%s(q_rows=%s topk_tokens=%s)",
+                        _md_is_dict, _prefix_in_md, _enc_prefix,
+                        type(_md).__name__,
+                        (list(_md.keys())[:4] if _md_is_dict else None),
                         tuple(ti.shape), ti.dtype, rows, cols, sample,
                         int(flat.min().item()), int(flat.max().item()),
                         flat.numel(), n_neg1,
@@ -616,6 +654,17 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                     )
                 except Exception as te:
                     logger.warning("[hy4-topk] dump failed: %s", te)
+            elif not _md_is_dict:
+                # Fake/profiling branch — log once so we can confirm dummy runs
+                # are being correctly skipped (and never counted against budget).
+                if not getattr(SparseAttnIndexer, "_mx_topk_fake_logged", False):
+                    SparseAttnIndexer._mx_topk_fake_logged = True
+                    logger.warning(
+                        "[hy4-topk] SKIP fake/profiling call: attn_metadata "
+                        "type=%s (not dict) -> metax op returns uninitialised "
+                        "buffer; not counted. enc_prefix=%s",
+                        type(_md).__name__, _enc_prefix,
+                    )
 
             return topk_indices
 
