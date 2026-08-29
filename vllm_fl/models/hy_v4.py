@@ -562,9 +562,7 @@ class HYV4LogitsProcessor(LogitsProcessor):
         # Round 24b: dump the last-token logits argmax to see if lm_head maps the
         # final hidden to the repeated token (garbage) vs a sane distribution.
         try:
-            from vllm.forward_context import get_forward_context
-            if (isinstance(getattr(get_forward_context(), "attn_metadata", None), dict)
-                    and getattr(HYV4ForCausalLM, "_hy4_logit_dbg_n", 0) < 4
+            if (getattr(HYV4ForCausalLM, "_hy4_logit_dbg_n", 0) < 4
                     and logits is not None):
                 HYV4ForCausalLM._hy4_logit_dbg_n = getattr(
                     HYV4ForCausalLM, "_hy4_logit_dbg_n", 0) + 1
