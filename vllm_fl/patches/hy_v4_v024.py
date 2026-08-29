@@ -1003,8 +1003,12 @@ def apply_hy_v4_v024_patches() -> bool:
     # Patch INT8 MoE support for MetaX (cuda_alike but not nvidia)
     _patch_int8_moe_for_metax()
 
-    # Patch SparseAttnIndexer to work on MACA (is_cuda_alike but not is_cuda)
-    _patch_sparse_attn_indexer_for_maca()
+    # NOTE: The HYV4 Indexer now instantiates thead's PPUBF16SparseAttnIndexer
+    # directly (see hy_v4_attention.Indexer), so the vLLM-native SparseAttnIndexer
+    # is no longer on the code path. Monkey-patching its forward_native only
+    # re-routed through vLLM's CustomOp dispatch (forward_oot -> forward_native)
+    # and is intentionally disabled here.
+    # _patch_sparse_attn_indexer_for_maca()
 
     # Patch FlashMLA sparse decode to use MetaX kernels
     _patch_flashmla_sparse_for_metax()

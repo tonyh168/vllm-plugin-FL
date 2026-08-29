@@ -32,15 +32,12 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8 as _per_token_group_quant_fp8_orig,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.selector import get_attn_backend
+
+from vllm_fl.models.hy_v4_indexer import PPUBF16SparseAttnIndexer
 
 logger = init_logger(__name__)
 
@@ -86,20 +83,6 @@ def _hy4_dbg_tensor(tag: str, t) -> None:
         )
     except Exception as _e:
         logger.warning("[hy4-attn] %s dump failed: %s", tag, _e)
-
-
-def per_token_group_quant_fp8(x, *args, **kwargs):
-    """MACA-safe wrapper for per_token_group_quant_fp8.
-
-    The vLLM implementation tries a _C CUDA op first (when x is contiguous),
-    but that op has no MACA backend. We make x non-contiguous via pad+slice
-    so it skips the _C branch and falls through to the triton kernel.
-    The triton path only requires stride(-1)==1 which the slice preserves.
-    """
-    if x.is_contiguous() and x.ndim >= 2:
-        padded = torch.nn.functional.pad(x, (0, 1))
-        x = padded[..., :-1]  # same data, non-contiguous (stride(-2) = N+1)
-    return _per_token_group_quant_fp8_orig(x, *args, **kwargs)
 
 
 def compute_skip_topk_layers(config: PretrainedConfig) -> set[int]:
@@ -216,63 +199,33 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.wk_weights_proj",
         )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
-        self.softmax_scale = self.head_dim**-0.5
+        # BF16 lightning-indexer score scale. The FP8 path used to fold the
+        # per-token quant scale into ``weights`` at runtime; the BF16 indexer
+        # keeps q in BF16 so the score scale is a single constant
+        # (softmax_scale * n_head**-0.5) applied to the per-head weights.
+        self.register_buffer(
+            "_weights_scale",
+            torch.tensor(
+                self.head_dim**-0.5 * self.n_head**-0.5,
+                dtype=torch.bfloat16,
+            ),
+            persistent=False,
+        )
 
-        self.scale_fmt = "ue8m0"
-        self.quant_block_size = 128
         self.topk_indices_buffer = topk_indices_buffer
-
-        # Indexer k-cache layout must match the MQA-logits kernel that
-        # SparseAttnIndexer ends up calling:
-        #   - NVIDIA/CUDA: FP8 naive cache — values in fp8 plus one fp32 scale
-        #     per ``quant_block_size`` elements, so head_dim = head_dim + 4.
-        #     deep_gemm's fp8_paged_mqa_logits consumes this packed layout.
-        #   - MACA/MetaX: MACA has no fp8_mqa_logits, so the indexer is forced
-        #     onto the bf16 kernel (see hy_v4_v024._patch_sparse_attn_indexer_for_maca
-        #     and mx_sparse_attn_indexer_bf16). bf16_paged_mqa_logits asserts
-        #     ``kv_dim == head_dim`` (no packed scale), so the cache must be a
-        #     plain bf16 buffer of width head_dim. Writing the fp8-packed width
-        #     (head_dim + 4) here is what triggered the decode-time
-        #     ``assert kv_heads == 1 and kv_dim == head_dim`` failure in
-        #     deep_gemm/bf16_attention.py:366. Mirrors vllm_metax's own
-        #     DeepseekV32Indexer branch (default VLLM_METAX_USE_FP8_SPARSE_ATTN_INDEXER=0).
-        assert cache_config is not None, "HYV4 indexer requires cache_config"
-        if current_platform.is_cuda():
-            k_cache_head_dim = (
-                self.head_dim + self.head_dim // self.quant_block_size * 4
-            )
-            k_cache_dtype = torch.uint8
-        else:
-            k_cache_head_dim = self.head_dim
-            k_cache_dtype = torch.bfloat16
-        self.k_cache = DeepseekV32IndexerCache(
-            head_dim=k_cache_head_dim,
-            dtype=k_cache_dtype,
-            prefix=f"{prefix}.k_cache",
-            cache_config=cache_config,
-        )
-        logger.info(
-            "[hy4-indexer] %s: k_cache layout head_dim=%s dtype=%s "
-            "(index_head_dim=%s, is_cuda=%s). bf16 kernel needs "
-            "cache_head_dim==index_head_dim; fp8 path adds +4 for packed scale.",
-            prefix, k_cache_head_dim, k_cache_dtype, self.head_dim,
-            current_platform.is_cuda(),
-        )
-        self.max_model_len = vllm_config.model_config.max_model_len
+        if topk_indices_buffer is None:
+            raise ValueError("HYV4 sparse attention requires a top-k buffer")
         self.prefix = prefix
-
-        from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
-
-        self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
-        self.indexer_op = SparseAttnIndexer(
-            self.k_cache,
-            self.quant_block_size,
-            self.scale_fmt,
-            self.topk_tokens,
-            self.head_dim,
-            self.max_model_len,
-            self.max_total_seq_len,
-            self.topk_indices_buffer,
+        # thead PPU BF16 indexer: keeps q/k and the paged cache in BF16 and
+        # runs the top-k selection with regular PyTorch/Triton ops. It creates
+        # its own BF16 DeepseekV32IndexerCache internally from cache_config.
+        self.indexer_op = PPUBF16SparseAttnIndexer(
+            head_dim=self.head_dim,
+            topk_tokens=self.topk_tokens,
+            cache_config=cache_config,
+            topk_indices_buffer=topk_indices_buffer,
+            prefix=prefix,
+            max_model_len=vllm_config.model_config.max_model_len,
         )
 
     def forward(
@@ -318,27 +271,16 @@ class Indexer(nn.Module):
         k_pe = k_pe.reshape(-1, 1, self.rope_dim)
 
         # Reassemble with the original physical layout: no_pe first, pe last.
+        # q stays BF16 in [num_tokens, n_head, head_dim] for the BF16 indexer.
         q = torch.cat([q_nope, q_pe], dim=-1)
         # ``k_pe`` is [num_tokens, 1, rope_dim] (MQA).
         k = torch.cat([k_nope, k_pe.squeeze(-2)], dim=-1)
 
-        # Only q is quantized here; k quantization is fused with cache insertion.
-        q = q.view(-1, self.head_dim)
-        q_fp8, q_scale = per_token_group_quant_fp8(
-            q,
-            self.quant_block_size,
-            column_major_scales=False,
-            use_ue8m0=self.scale_fmt is not None,
-        )
-        q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
-        q_scale = q_scale.view(-1, self.n_head, 1)
+        # BF16 path: no per-token FP8 quant, so the score scale is a single
+        # constant folded into the per-head weights.
+        weights = weights * self._weights_scale
 
-        weights = (
-            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
-        )
-        weights = weights.squeeze(-1)
-
-        return hidden_states, q_fp8, k, weights
+        return hidden_states, q, k, weights
 
 
 class HYV4MLAAttention(nn.Module):
