@@ -7,6 +7,7 @@ Overrides vLLM's native FLASHMLA_SPARSE which requires vllm._flashmla_C
 (NVIDIA-only). Routes sparse MLA decode to MetaX's flash_mla library instead.
 """
 
+import os
 from typing import Any, ClassVar
 
 import torch
@@ -24,7 +25,18 @@ from vllm.v1.attention.backends.registry import (
     register_backend,
 )
 
-from ..ops.flashmla import flash_mla_sparse_prefill, is_flashmla_sparse_supported
+from ..ops.flashmla import (
+    flash_mla_sparse_prefill,
+    is_flashmla_sparse_supported,
+    torch_flash_mla_sparse_prefill,
+)
+
+# Round 22 diagnostic: swap the MetaX C sparse-prefill kernel for the known-good
+# pure-torch reference (torch_flash_mla_sparse_prefill, which correctly masks
+# invalid/-1 indices to -inf and applies sm_scale*log2(e)). Set to 1 to test
+# whether the "repeat last token" garbage lives in the MetaX kernel's numerics /
+# invalid-index masking. Default off => original behaviour. Reversible.
+_HY4_SPARSE_TORCH_REF = os.environ.get("VLLM_HY4_SPARSE_TORCH_REF", "0") == "1"
 
 logger = init_logger(__name__)
 
@@ -82,12 +94,26 @@ class MacaFlashMLASparseImpl(FlashMLASparseImpl):
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output, _max_logits, _lse = flash_mla_sparse_prefill(
-            q,
-            kv_c_and_k_pe_cache,
-            topk_indices,
-            self.softmax_scale,
-        )
+        if _HY4_SPARSE_TORCH_REF:
+            # Diagnostic path: known-good torch ref that masks invalid indices.
+            logger.warning_once(
+                "[hy4-sparse] VLLM_HY4_SPARSE_TORCH_REF=1 -> using "
+                "torch_flash_mla_sparse_prefill (masks -1) instead of MetaX "
+                "flash_mla_sparse_prefill. DIAGNOSTIC ONLY, slow."
+            )
+            output, _max_logits, _lse = torch_flash_mla_sparse_prefill(
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices,
+                self.softmax_scale,
+            )
+        else:
+            output, _max_logits, _lse = flash_mla_sparse_prefill(
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices,
+                self.softmax_scale,
+            )
 
         output = output[:, : self.num_heads, :]
         return output
