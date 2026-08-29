@@ -11,13 +11,7 @@ from __future__ import annotations
 
 import os
 import torch
-try:
-    # FlagGems gained this kernel after commit 62d70b9e8 (2026-07-01). Prefer
-    # it when present so a FlagGems upgrade automatically supersedes the
-    # plugin-local copy below.
-    from flag_gems.fused import bf16_paged_mqa_logits
-except ImportError:  # pragma: no cover - depends on the FlagGems build
-    from vllm_fl.ops.bf16_paged_mqa_logits import bf16_paged_mqa_logits
+from flag_gems.fused import bf16_paged_mqa_logits
 from torch import nn
 
 from vllm.forward_context import get_forward_context
@@ -114,26 +108,6 @@ class PPUBF16SparseAttnIndexer(nn.Module):
             cache_config=cache_config,
         )
 
-        # The custom op can only carry tensors and plain scalars, so bind this
-        # instance to its layer name and pass the name through the op.
-        #
-        # splitting_ops is extended HERE rather than in register_model():
-        # that hook runs before any set_current_vllm_config() context exists,
-        # so get_current_vllm_config() raises there. Module construction is
-        # inside the context and still well before compilation, which is the
-        # only ordering requirement.
-        from vllm.config import get_current_vllm_config
-        from vllm_fl.ops.hyv4_indexer_op import (
-            add_to_splitting_ops,
-            register_indexer,
-            register_op,
-        )
-
-        register_op()
-        add_to_splitting_ops(get_current_vllm_config())
-        self._fl_layer_name = prefix
-        register_indexer(prefix, self)
-
     def _write_cache(
         self,
         keys: torch.Tensor,
@@ -149,6 +123,14 @@ class PPUBF16SparseAttnIndexer(nn.Module):
         metadata: DeepseekV32IndexerMetadata,
     ) -> None:
         assert metadata.prefill is not None
+        # Shape check: ensure num_heads matches FlagGems kernel requirements
+        # (prefill doesn't use FlagGems kernel, but check for consistency)
+        num_heads = q.shape[-2] if q.ndim >= 2 else 0
+        if num_heads not in (32, 64):
+            raise ValueError(
+                f"Indexer requires num_heads in {{32, 64}}, got {num_heads}. "
+                f"Query shape: {q.shape}"
+            )
         for chunk in metadata.prefill.chunks:
             cu_seq_lens = chunk.cu_seq_lens.tolist()
             gathered = [
@@ -189,6 +171,13 @@ class PPUBF16SparseAttnIndexer(nn.Module):
         metadata: DeepseekV32IndexerMetadata,
     ) -> None:
         assert metadata.decode is not None
+        # FlagGems bf16_paged_mqa_logits only supports H=32 or H=64 (hardcoded kernels)
+        num_heads = q.shape[-2] if q.ndim >= 2 else 0
+        if num_heads not in (32, 64):
+            raise ValueError(
+                f"FlagGems BF16 paged MQA logits requires num_heads in {{32, 64}}, "
+                f"got {num_heads}. Query shape: {q.shape}"
+            )
         decode = metadata.decode
         decode_lens = decode.decode_lens
         num_decode_tokens = metadata.num_decode_tokens
@@ -272,42 +261,7 @@ class PPUBF16SparseAttnIndexer(nn.Module):
         k: torch.Tensor,
         weights: torch.Tensor,
     ) -> torch.Tensor:
-        """Dispatch through a custom op so torch.compile splits the graph here.
-
-        Everything in ``run_eager`` is host-side control flow over per-batch
-        attention metadata. Traced inline, the branch taken at trace time gets
-        frozen for every subsequent batch and the top-k indices go wrong --
-        silently, since wrong indices still decode to fluent text. Routing
-        through ``vllm_fl::hyv4_sparse_attn_indexer`` (registered in
-        ``splitting_ops``) mirrors what vLLM's own ``vllm::sparse_attn_indexer``
-        does for the in-tree indexer.
-        """
         del hidden_states
-        from vllm_fl.ops.hyv4_indexer_op import OP_NAME, OP_NAMESPACE
-
-        op = getattr(getattr(torch.ops, OP_NAMESPACE), OP_NAME)
-        op(q, k, weights, self.topk_indices_buffer, self._fl_layer_name)
-        return self.topk_indices_buffer
-
-    @torch.no_grad()
-    def run_eager(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        weights: torch.Tensor,
-    ) -> torch.Tensor:
-        # One-shot log: confirm this PyTorch indexer is actually running
-        if not hasattr(self, '_hy4_pytorch_indexer_run_logged'):
-            self._hy4_pytorch_indexer_run_logged = True
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(
-                "[hy4-indexer-pytorch] run_eager ENTERED: q=%s k=%s layer=%s | "
-                "Confirmed PPUBF16SparseAttnIndexer is active",
-                tuple(q.shape), tuple(k.shape) if k is not None else None,
-                self.k_cache.prefix,
-            )
-
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
             self.topk_indices_buffer[: q.shape[0]].fill_(-1)

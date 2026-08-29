@@ -520,13 +520,19 @@ def _patch_bf16_paged_mqa_logits_debug() -> None:
 
 
 def _patch_sparse_attn_indexer_for_maca() -> None:
-    """Patch SparseAttnIndexer.forward_native to use PyTorch BF16 indexer.
+    """Patch SparseAttnIndexer.forward_native to use thead's BF16 indexer.
 
     Phase 1c: Replace MetaX C++ kernel (torch.ops.vllm.mx_sparse_attn_indexer_bf16
-    + bf16_paged_mqa_logits) with hygon's pure PyTorch PPUBF16SparseAttnIndexer.
+    + bf16_paged_mqa_logits) with thead's PPUBF16SparseAttnIndexer (Triton-based).
+
     The C++ kernel has paged KV address mapping issues (block#1 has data but
-    output still repeats), so we use the portable PyTorch reference impl that
-    works on hygon/thead as a validation baseline.
+    output still repeats), so we use thead's Triton implementation that works
+    on hygon/thead as a validation baseline.
+
+    thead indexer requirements (checked at init + runtime):
+    - head_dim = 128 (FlagGems bf16_paged_mqa_logits hardcoded)
+    - block_size = 64 (FlagGems hardcoded)
+    - num_heads ∈ {32, 64} (FlagGems has two specialized kernels)
 
     The upstream forward_cuda calls NVIDIA-only C++ ops
     (indexer_k_quant_and_cache with fp8_e4m3, DeepGEMM fp8_mqa_logits, etc.)
@@ -564,72 +570,79 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
 
         def _patched_init(self, *args, **kwargs):
             _orig_init(self, *args, **kwargs)
-            # Instantiate the PyTorch indexer as a fallback/reference impl
-            # It needs: head_dim, topk_tokens, cache_config, topk_indices_buffer,
-            # prefix, max_model_len — all available in SparseAttnIndexer
+            # Instantiate thead's Triton-based indexer (FlagGems + vllm_fl ops)
+            # Requirements checked inside PPUBF16SparseAttnIndexer.__init__:
+            #   - head_dim = 128
+            #   - block_size = 64
+            # num_heads ∈ {32, 64} checked at runtime in _prefill/_decode
             try:
+                cache_config = self.k_cache.cache_config if hasattr(self.k_cache, 'cache_config') else None
                 self._pytorch_indexer = PPUBF16SparseAttnIndexer(
                     head_dim=self.head_dim,
                     topk_tokens=self.topk_tokens,
-                    cache_config=self.k_cache.cache_config if hasattr(self.k_cache, 'cache_config') else None,
+                    cache_config=cache_config,
                     topk_indices_buffer=self.topk_indices_buffer,
                     prefix=self.k_cache.prefix,
                     max_model_len=self.max_model_len,
                 )
                 logger.warning(
-                    "[hy4-indexer-pytorch] Initialized PPUBF16SparseAttnIndexer "
-                    "(hygon ref impl) for layer %s", self.k_cache.prefix
+                    "[hy4-indexer-thead] ✓ Initialized PPUBF16SparseAttnIndexer "
+                    "(Triton-based, thead version) for layer %s: "
+                    "head_dim=%d topk=%d block_size=%d max_len=%d",
+                    self.k_cache.prefix, self.head_dim, self.topk_tokens,
+                    cache_config.block_size if cache_config else -1,
+                    self.max_model_len,
                 )
             except Exception as e:
                 logger.warning(
-                    "[hy4-indexer-pytorch] Failed to init PyTorch indexer: %s. "
-                    "Will fall back to original forward_native.", e
+                    "[hy4-indexer-thead] ✗ Failed to init thead indexer: %s. "
+                    "Will fall back to original forward_native (will fail on MACA).", e
                 )
                 self._pytorch_indexer = None
 
         def _forward_native_pytorch(self, hidden_states, q_quant, k, weights):
-            """Use pure PyTorch indexer (hygon's PPUBF16SparseAttnIndexer)."""
+            """Use thead's Triton-based indexer (PPUBF16SparseAttnIndexer)."""
             if not current_platform.is_cuda_alike():
                 return _orig_forward_native(
                     self, hidden_states, q_quant, k, weights
                 )
 
-            # If PyTorch indexer failed to init, fall back
+            # If thead indexer failed to init, fall back (will fail on MACA)
             if not hasattr(self, '_pytorch_indexer') or self._pytorch_indexer is None:
                 logger.warning_once(
-                    "[hy4-indexer-pytorch] PyTorch indexer not available, "
-                    "falling back to original forward_native"
+                    "[hy4-indexer-thead] thead indexer not available, "
+                    "falling back to original forward_native (will NotImplementedError on MACA)"
                 )
                 return _orig_forward_native(
                     self, hidden_states, q_quant, k, weights
                 )
 
             # PPUBF16SparseAttnIndexer.forward signature:
-            # forward(hidden_states, attn_metadata, k, weights) -> topk_indices
+            # forward(hidden_states, q, k, weights) -> topk_indices
             # It expects attn_metadata from get_forward_context()
             from vllm.v1.worker.gpu_model_runner import get_forward_context
             ctx = get_forward_context()
             attn_metadata = getattr(ctx, 'attn_metadata', None)
             if attn_metadata is None:
                 logger.warning_once(
-                    "[hy4-indexer-pytorch] No attn_metadata in forward_context, "
-                    "cannot use PyTorch indexer (needs cache ops). Fallback."
+                    "[hy4-indexer-thead] No attn_metadata in forward_context, "
+                    "cannot use thead indexer (needs cache ops). Fallback."
                 )
                 return _orig_forward_native(
                     self, hidden_states, q_quant, k, weights
                 )
 
-            # One-shot call log: confirm PyTorch indexer is actually invoked
-            if not hasattr(self, '_pytorch_indexer_called'):
-                self._pytorch_indexer_called = {'prefill': False, 'decode': False}
+            # One-shot call log: confirm thead indexer is actually invoked
+            if not hasattr(self, '_thead_indexer_called'):
+                self._thead_indexer_called = {'prefill': False, 'decode': False}
             num_tokens = hidden_states.shape[0] if hidden_states.ndim >= 1 else 0
             phase = 'prefill' if num_tokens >= 2 else 'decode'
-            if not self._pytorch_indexer_called[phase]:
-                self._pytorch_indexer_called[phase] = True
+            if not self._thead_indexer_called[phase]:
+                self._thead_indexer_called[phase] = True
                 logger.warning(
-                    "[hy4-indexer-pytorch] CALLED %s: hidden_states=%s k=%s "
+                    "[hy4-indexer-thead] CALLED %s: hidden_states=%s k=%s "
                     "attn_metadata_type=%s layer=%s | "
-                    "Confirmed using PyTorch indexer (not MetaX C++ kernel)",
+                    "Confirmed using thead Triton indexer (not MetaX C++ kernel)",
                     phase.upper(),
                     tuple(hidden_states.shape),
                     tuple(k.shape) if k is not None else None,
@@ -637,18 +650,19 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                     self.k_cache.prefix,
                 )
 
-            # Call PyTorch indexer
+            # Call thead indexer (signature matches thead's forward, not hygon's)
+            # thead forward(hidden_states, q, k, weights), hygon has extra attn_metadata arg
             topk_indices = self._pytorch_indexer.forward(
-                hidden_states, attn_metadata, k, weights
+                hidden_states, q_quant, k, weights
             )
 
             # One-shot result log: show topk_indices shape/stats
-            if not getattr(self, '_pytorch_indexer_result_logged', False):
-                self._pytorch_indexer_result_logged = True
+            if not getattr(self, '_thead_indexer_result_logged', False):
+                self._thead_indexer_result_logged = True
                 try:
                     flat = topk_indices.detach().reshape(-1)
                     logger.warning(
-                        "[hy4-indexer-pytorch] RESULT: topk_indices=%s/%s "
+                        "[hy4-indexer-thead] RESULT: topk_indices=%s/%s "
                         "min=%s max=%s nonzero=%s numel=%s | sample[:20]=%s",
                         tuple(topk_indices.shape), topk_indices.dtype,
                         int(flat.min().item()), int(flat.max().item()),
@@ -656,7 +670,7 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                         flat[:20].tolist(),
                     )
                 except Exception as re:
-                    logger.warning("[hy4-indexer-pytorch] result log failed: %s", re)
+                    logger.warning("[hy4-indexer-thead] result log failed: %s", re)
 
             return topk_indices
 
@@ -735,8 +749,9 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
         SparseAttnIndexer.__init__ = _patched_init
         SparseAttnIndexer.forward_native = _forward_native_pytorch
         logger.warning(
-            "[hy4-indexer-pytorch] Patched SparseAttnIndexer to use PyTorch "
-            "BF16 indexer (hygon ref impl) instead of MetaX C++ kernels"
+            "[hy4-indexer-thead] Patched SparseAttnIndexer to use thead's "
+            "Triton-based BF16 indexer (FlagGems + vllm_fl ops) instead of MetaX C++ kernels. "
+            "Requirements: head_dim=128, block_size=64, num_heads∈{32,64}"
         )
 
     except Exception as e:
