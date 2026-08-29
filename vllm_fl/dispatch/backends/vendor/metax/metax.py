@@ -48,18 +48,30 @@ def register_attention_backends():
     # compiled extension `vllm._flashmla_C` (absent on MetaX) and crashes with
     # "vllm._flashmla_C is not available".
     #
-    # IMPORTANT: target plugin-FL's OWN native sparse backend, NOT vllm_metax.
-    # vllm_metax is a SEPARATE platform plugin that is mutually exclusive with
-    # plugin-FL ("Only one platform plugin can be activated"); under
-    # VLLM_PLUGINS=fl it is not the active platform, so pointing the override at
-    # vllm_metax.MacaFlashMLASparseBackend is architecturally wrong. plugin-FL
-    # ships a native sparse MLA backend (FlagGemsSparseMLABackend) that supports
-    # head_size 576 (GLM5-Next), is_mla + is_sparse, and dispatches the sparse
-    # kernel through flag_gems.fused.flashmla_sparse.flash_mla_sparse_fwd — no
-    # `vllm._flashmla_C` dependency.
+    # We target the vendor vllm_metax sparse MLA backend rather than plugin-FL's
+    # own FlagGemsSparseMLABackend. Rationale (correcting an earlier assumption):
+    #   - The FlagGems backend dispatches the sparse kernel through
+    #     flag_gems.fused.flashmla_sparse.flash_mla_sparse_fwd. That kernel was
+    #     never end-to-end validated on MetaX for accuracy; to make it merely
+    #     RUN we had to strip its autotune configs down to a single minimal
+    #     BK=16/BH=16 tile ("only-make-it-run, performance be damned"). Simple
+    #     prompts return correct tokens, but GPQA (long context + fine-grained
+    #     topk) surfaced accuracy problems traced to this path.
+    #   - vllm_metax's MacaFlashMLASparseBackend dispatches through
+    #     vllm_metax.v1.attention.ops.flashmla -> the `flash_mla` python package
+    #     (flash_mla_cuda C extension), a MetaX-vendor-compiled & validated
+    #     kernel. It does NOT touch FlagGems and does NOT need `vllm._flashmla_C`.
+    #   - The "vllm_metax is a mutually-exclusive platform plugin" concern does
+    #     NOT apply here: register_backend only writes a class-path string into
+    #     _ATTN_OVERRIDES and lazily imports ONE backend class. It does not
+    #     activate the vllm_metax platform, so it is compatible with
+    #     VLLM_PLUGINS=fl. Verified offline: under VLLM_PLUGINS=fl the class
+    #     resolves, get_supported_head_sizes()=[512,576] (GLM5.3 is 576),
+    #     is_mla/is_sparse=True, and its impl reads indexer.topk_indices_buffer
+    #     exactly like the FlagGems impl (interface-compatible).
     register_backend(
         AttentionBackendEnum.FLASHMLA_SPARSE,
-        class_path="vllm_fl.dispatch.backends.flaggems.impl.mla_sparse.FlagGemsSparseMLABackend",
+        class_path="vllm_metax.v1.attention.backends.mla.flashmla_sparse.MacaFlashMLASparseBackend",
     )
 
     # Defeat @cache poisoning on _cached_get_attn_backend: if the sparse MLA
