@@ -205,6 +205,7 @@ def flash_mla_sparse_prefill(
     indices: torch.Tensor,
     sm_scale: float,
     d_v: int = 512,
+    indices_all_valid_per_q: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Sparse attention prefill kernel
@@ -216,6 +217,11 @@ def flash_mla_sparse_prefill(
         Invalid indices should be set to -1 or numbers >= s_kv
     - sm_scale: float
     - d_v: The dimension of value vectors. Can only be 512
+    - indices_all_valid_per_q: optional [s_q] int32, per-query count of valid
+        indices (== upstream ``topk_length``). When None the kernel assumes all
+        `topk` lanes are valid and relies solely on the -1 sentinel; round 24
+        wires this through to test whether the MetaX kernel needs the explicit
+        count to mask padded lanes.
 
     Returns:
     - (output, max_logits, lse)
@@ -229,7 +235,8 @@ def flash_mla_sparse_prefill(
     # /------------------------  Metax Modification -------------------------\
     # flash_mla_interface.flash_mla_sparse_fwd accepts optional indices_all_valid_per_q
     results = flash_mla.flash_mla_interface.flash_mla_sparse_fwd(
-        q, kv, indices, sm_scale, d_v=d_v, indices_all_valid_per_q=None
+        q, kv, indices, sm_scale, d_v=d_v,
+        indices_all_valid_per_q=indices_all_valid_per_q,
     )
     # \------------------------- Metax Modification -------------------------/
     return results

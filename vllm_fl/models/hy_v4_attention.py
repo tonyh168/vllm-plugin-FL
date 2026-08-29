@@ -47,6 +47,46 @@ logger = init_logger(__name__)
 _SPARSE_LAYER_TYPES = ("sparse_attention", "sparse", "deepseek_sparse_attention")
 _WEIGHT_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
+# Round 24: layer-0 attention datapath tracing for the "repeat last token"
+# garbage. Only fires on real steps (attn_metadata is a dict, not a dummy/
+# profiling run) and is capped to a handful of prints. WARNING level because
+# INFO from plugin modules is filtered in this deployment.
+_HY4_DBG_MAX = 8
+
+
+def _hy4_is_real_step() -> bool:
+    try:
+        from vllm.forward_context import get_forward_context
+        return isinstance(getattr(get_forward_context(), "attn_metadata", None), dict)
+    except Exception:
+        return False
+
+
+def _hy4_dbg_tensor(tag: str, t) -> None:
+    """Log shape/dtype/norm/mean/std/min/max/nan/inf + first elems for a tensor."""
+    try:
+        import torch as _torch
+        if not isinstance(t, _torch.Tensor):
+            logger.warning("[hy4-attn] %s: not a tensor (%s)", tag, type(t).__name__)
+            return
+        f = t.detach().float().reshape(-1)
+        head = f[:8].tolist()
+        # per-token norm on last row if 2D-ish
+        last_norm = None
+        if t.dim() >= 2:
+            last_norm = float(t.detach().float().reshape(t.shape[0], -1)[-1].norm().item())
+        logger.warning(
+            "[hy4-attn] %s shape=%s dtype=%s | norm=%.4f mean=%.4e std=%.4e "
+            "min=%.4e max=%.4e | nan=%s inf=%s | last_tok_norm=%s | head=%s",
+            tag, tuple(t.shape), t.dtype, float(f.norm().item()),
+            float(f.mean().item()), float(f.std().item()),
+            float(f.min().item()), float(f.max().item()),
+            bool(f.isnan().any().item()), bool(f.isinf().any().item()),
+            None if last_norm is None else round(last_norm, 4), head,
+        )
+    except Exception as _e:
+        logger.warning("[hy4-attn] %s dump failed: %s", tag, _e)
+
 
 def per_token_group_quant_fp8(x, *args, **kwargs):
     """MACA-safe wrapper for per_token_group_quant_fp8.
@@ -729,12 +769,32 @@ class HYV4MLAAttention(nn.Module):
         attn_out = torch.empty(
             output_shape, dtype=hidden_states.dtype, device=hidden_states.device
         )
+        _dbg = (
+            self.layer_id == 0
+            and getattr(HYV4MLAAttention, "_hy4_dbg_n", 0) < _HY4_DBG_MAX
+            and _hy4_is_real_step()
+        )
+        if _dbg:
+            HYV4MLAAttention._hy4_dbg_n = getattr(HYV4MLAAttention, "_hy4_dbg_n", 0) + 1
+            _hy4_dbg_tensor("L0.in hidden", hidden_states)
+            _hy4_dbg_tensor("L0.q (post-proj+rope)", q)
+            _hy4_dbg_tensor("L0.kv_c_normed", kv_c_normed)
+            _hy4_dbg_tensor("L0.k_pe", k_pe)
+
         self._indexer_and_attn(
             hidden_states, q_c, positions, q, kv_c_normed, k_pe, attn_out
         )
 
+        if _dbg:
+            # Attention output BEFORE the gate. If the last token's norm is ~0 or
+            # constant across tokens, attention collapsed -> "repeat last token".
+            _hy4_dbg_tensor("L0.attn_out (pre-gate)", attn_out)
+
         if self.gated_mla and self.linear_gate is not None:
             gate_score = self.linear_gate(hidden_states)[0]
+            if _dbg:
+                _hy4_dbg_tensor("L0.gate_score (pre-sigmoid)", gate_score)
+                _hy4_dbg_tensor("L0.sigmoid(gate)", torch.sigmoid(gate_score))
             if self.config.gating_type == "headwise":
                 gate_score = gate_score.unsqueeze(-1)
                 attn_out = attn_out.reshape(*attn_out.shape[:-1], -1, self.v_head_dim)
@@ -743,7 +803,12 @@ class HYV4MLAAttention(nn.Module):
             else:
                 attn_out = attn_out * torch.sigmoid(gate_score)
 
+        if _dbg:
+            _hy4_dbg_tensor("L0.attn_out (post-gate)", attn_out)
+
         out, _ = self.o_proj(attn_out)
+        if _dbg:
+            _hy4_dbg_tensor("L0.o_proj out", out)
         return out
 
     @eager_break_during_capture

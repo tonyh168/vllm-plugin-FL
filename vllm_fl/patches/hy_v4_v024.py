@@ -703,11 +703,65 @@ def _patch_flashmla_sparse_for_metax() -> None:
             flash_mla_sparse_prefill,
         )
 
+        import os as _os
+        # Round 24: wire topk_length -> indices_all_valid_per_q when set. The
+        # native wrapper dropped both topk_length and attn_sink; short prompts
+        # have ~2044/2048 padded (-1) lanes, so if the MetaX kernel needs the
+        # explicit valid-count to mask them, dropping it collapses softmax over
+        # garbage -> "repeat last token". Default off = original behaviour.
+        _pass_valid_len = _os.environ.get(
+            "VLLM_HY4_SPARSE_PASS_VALIDLEN", "0"
+        ) == "1"
+
         def _maca_flash_mla_sparse_fwd(
             q, kv, indices, sm_scale, topk_length=None, attn_sink=None
         ):
-            """Wrapper matching the native flash_mla_sparse_fwd signature."""
-            return flash_mla_sparse_prefill(q, kv, indices, sm_scale)
+            """Wrapper matching the native flash_mla_sparse_fwd signature.
+
+            Round 24 diagnostic: dump — once per real step — whether the native
+            contract args (topk_length / attn_sink) are being dropped, plus the
+            per-query valid-index count and the kernel output norm. This is the
+            decisive probe for the "repeat last token" garbage.
+            """
+            valid_len = None
+            if _pass_valid_len and topk_length is not None:
+                valid_len = topk_length
+
+            out = flash_mla_sparse_prefill(
+                q, kv, indices, sm_scale,
+                indices_all_valid_per_q=valid_len,
+            )
+
+            n = getattr(_maca_flash_mla_sparse_fwd, "_dbg_n", 0)
+            if n < 6:
+                _maca_flash_mla_sparse_fwd._dbg_n = n + 1
+                try:
+                    o = out[0] if isinstance(out, tuple) else out
+                    # per-row valid index count (indices: [s_q, 1, topk])
+                    idx2d = indices.reshape(indices.shape[0], -1)
+                    valid_per_row = (idx2d >= 0).sum(dim=1)
+                    last_out = o.reshape(o.shape[0], -1)[-1].float()
+                    logger.warning(
+                        "[hy4-mla-kernel] q=%s/%s indices=%s sm_scale=%s | "
+                        "DROPPED topk_length=%s attn_sink=%s pass_validlen=%s | "
+                        "valid_per_row[first3]=%s [last]=%s (topk=%s) | "
+                        "out=%s/%s out_norm_per_tok[first]=%.4f [last]=%.4f "
+                        "last_out_isnan=%s isinf=%s",
+                        tuple(q.shape), q.dtype, tuple(indices.shape), sm_scale,
+                        None if topk_length is None else tuple(topk_length.shape),
+                        None if attn_sink is None else tuple(attn_sink.shape),
+                        _pass_valid_len,
+                        valid_per_row[:3].tolist(),
+                        int(valid_per_row[-1].item()), idx2d.shape[1],
+                        tuple(o.shape), o.dtype,
+                        float(o.reshape(o.shape[0], -1)[0].float().norm().item()),
+                        float(last_out.norm().item()),
+                        bool(last_out.isnan().any().item()),
+                        bool(last_out.isinf().any().item()),
+                    )
+                except Exception as _e:
+                    logger.warning("[hy4-mla-kernel] dump failed: %s", _e)
+            return out
 
         # Patch the ops module so any code importing from there gets MetaX version
         import vllm.v1.attention.ops.flashmla as flashmla_ops
