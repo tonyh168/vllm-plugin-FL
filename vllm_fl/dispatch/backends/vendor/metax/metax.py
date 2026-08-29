@@ -82,7 +82,7 @@ def register_attention_backends():
     # vllm_metax conda package on every machine/reinstall.
     register_backend(
         AttentionBackendEnum.FLASHMLA_SPARSE,
-        class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.mla.flashmla_sparse.Glm53FlashMLASparseBackend",
+        class_path="vllm_fl.dispatch.backends.flaggems.impl.mla_sparse.FlagGemsSparseMLABackend",
     )
 
     # Defeat @cache poisoning on _cached_get_attn_backend: if the sparse MLA
