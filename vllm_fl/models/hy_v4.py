@@ -538,6 +538,53 @@ class HYV4Model(nn.Module):
         _dbg_stream("hc_head out", hidden_states)
         normed = self.norm(hidden_states)
         _dbg_stream("final norm out", normed)
+        # Phase 1 (new_repeat_plan): decide "attention family" vs "downstream
+        # family". If the repeat-last-token garbage is a HIDDEN collapse, the
+        # per-position final-hidden vectors are nearly identical (pairwise
+        # cosine ~1, tiny cross-position variance) -> bug is upstream in
+        # attention/MoE. If positions are well-separated here, hidden is fine
+        # and the collapse must be in lm_head/sampler (Phase 4b). Self-contained
+        # invariant, no golden needed. Gated to real steps only.
+        if _dbg:
+            try:
+                h = normed.detach().float()
+                h2d = h.reshape(h.shape[0], -1)  # [num_tokens, hidden]
+                n_tok = h2d.shape[0]
+                if n_tok >= 2:
+                    hn = torch.nn.functional.normalize(h2d, dim=-1)
+                    # full pairwise cosine matrix (small n_tok during prefill)
+                    cos = hn @ hn.t()
+                    off = cos - torch.eye(n_tok, device=cos.device)
+                    # off-diagonal stats: mean/max/min cosine between DISTINCT
+                    # positions. mean≈1 => collapse.
+                    denom = max(1, n_tok * n_tok - n_tok)
+                    off_mean = off.sum().item() / denom
+                    triu = cos[torch.triu(torch.ones_like(cos), diagonal=1) > 0]
+                    # cross-position variance of the hidden itself (per-dim std
+                    # averaged): ~0 => all positions identical.
+                    cross_std = h2d.std(dim=0).mean().item()
+                    logger.warning(
+                        "[hy4-phase1-hidden] n_tok=%s | pairwise_cos off-diag "
+                        "mean=%.4f max=%.4f min=%.4f | cross_pos_std=%.4e | "
+                        "per_tok_norm first=%.3f mid=%.3f last=%.3f | "
+                        "COLLAPSE(cos~1)=%s",
+                        n_tok, off_mean,
+                        float(triu.max()) if triu.numel() else float("nan"),
+                        float(triu.min()) if triu.numel() else float("nan"),
+                        cross_std,
+                        float(h2d[0].norm()),
+                        float(h2d[n_tok // 2].norm()),
+                        float(h2d[-1].norm()),
+                        bool(off_mean > 0.99),
+                    )
+                else:
+                    logger.warning(
+                        "[hy4-phase1-hidden] n_tok=%s (single token, no "
+                        "pairwise cosine); per_tok_norm=%.3f",
+                        n_tok, float(h2d[0].norm()),
+                    )
+            except Exception as _e:
+                logger.warning("[hy4-phase1-hidden] dump failed: %s", _e)
         return normed
 
 
@@ -580,6 +627,23 @@ class HYV4LogitsProcessor(LogitsProcessor):
                     float(last.min()), float(last.max()),
                     bool(lg.isnan().any()), bool(lg.isinf().any()),
                 )
+                # Phase 1 (new_repeat_plan): per-position argmax. If EVERY
+                # position's argmax is the same token id, the logits have
+                # collapsed regardless of hidden health -> confirms a downstream
+                # (lm_head/sampler) collapse when paired with a healthy
+                # [hy4-phase1-hidden]. If argmax varies sanely per position but
+                # output still repeats, the collapse is in sampling/detokenizer.
+                if lg.dim() == 2 and lg.shape[0] >= 2:
+                    argmax = lg.argmax(dim=-1)  # [num_tokens]
+                    n_tok = argmax.shape[0]
+                    uniq = torch.unique(argmax)
+                    logger.warning(
+                        "[hy4-phase1-logits] n_tok=%s | per_pos_argmax "
+                        "first8=%s last=%s | num_unique_argmax=%s | "
+                        "ALL_SAME(collapse)=%s",
+                        n_tok, argmax[:8].tolist(), int(argmax[-1].item()),
+                        int(uniq.numel()), bool(uniq.numel() == 1),
+                    )
         except Exception as _e:
             logger.warning("[hy4-logits] dump failed: %s", _e)
         return logits
