@@ -69,9 +69,20 @@ def register_attention_backends():
     #     resolves, get_supported_head_sizes()=[512,576] (GLM5.3 is 576),
     #     is_mla/is_sparse=True, and its impl reads indexer.topk_indices_buffer
     #     exactly like the FlagGems impl (interface-compatible).
+    #
+    # We register a thin plugin-FL subclass (Glm53FlashMLASparseBackend) rather
+    # than the vendor class directly. It reuses the vendor's kernels/impl verbatim
+    # but swaps in a metadata builder that forces bf16_use_mixed_batch=True. This
+    # is required because GLM5.3-Flash is a use-nope MLA (qk_rope_head_dim=0 ->
+    # head_size=512, not DeepSeek V3.2's 576): the vendor's default bf16 decode
+    # path calls flash_mla_cuda.fwd_kvcache_mla, whose kernel hard-asserts
+    # head_size==576 and crashes on 512. mixed_batch routes decode through the
+    # sparse prefill kernel (flash_mla_sparse_fwd), which handles 512. Keeping the
+    # override target inside plugin-FL avoids patching the non-version-controlled
+    # vllm_metax conda package on every machine/reinstall.
     register_backend(
         AttentionBackendEnum.FLASHMLA_SPARSE,
-        class_path="vllm_metax.v1.attention.backends.mla.flashmla_sparse.MacaFlashMLASparseBackend",
+        class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.mla.flashmla_sparse.Glm53FlashMLASparseBackend",
     )
 
     # Defeat @cache poisoning on _cached_get_attn_backend: if the sparse MLA
