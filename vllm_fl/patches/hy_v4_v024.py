@@ -630,6 +630,9 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
             phase = 'prefill' if num_tokens >= 2 else 'decode'
             if not self._thead_indexer_called[phase]:
                 self._thead_indexer_called[phase] = True
+                # Get attn_metadata for logging (thead indexer gets it internally)
+                ctx = get_forward_context()
+                attn_metadata = getattr(ctx, 'attn_metadata', None)
                 logger.warning(
                     "[hy4-indexer-thead] CALLED %s: hidden_states=%s k=%s "
                     "attn_metadata_type=%s layer=%s | "
@@ -637,7 +640,7 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                     phase.upper(),
                     tuple(hidden_states.shape),
                     tuple(k.shape) if k is not None else None,
-                    type(attn_metadata).__name__,
+                    type(attn_metadata).__name__ if attn_metadata is not None else "None",
                     self.k_cache.prefix,
                 )
 
