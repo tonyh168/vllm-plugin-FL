@@ -296,6 +296,18 @@ class PPUBF16SparseAttnIndexer(nn.Module):
         k: torch.Tensor,
         weights: torch.Tensor,
     ) -> torch.Tensor:
+        # One-shot log: confirm this PyTorch indexer is actually running
+        if not hasattr(self, '_hy4_pytorch_indexer_run_logged'):
+            self._hy4_pytorch_indexer_run_logged = True
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "[hy4-indexer-pytorch] run_eager ENTERED: q=%s k=%s layer=%s | "
+                "Confirmed PPUBF16SparseAttnIndexer is active",
+                tuple(q.shape), tuple(k.shape) if k is not None else None,
+                self.k_cache.prefix,
+            )
+
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
             self.topk_indices_buffer[: q.shape[0]].fill_(-1)

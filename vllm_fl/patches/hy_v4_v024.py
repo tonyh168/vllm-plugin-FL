@@ -619,10 +619,44 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
                     self, hidden_states, q_quant, k, weights
                 )
 
+            # One-shot call log: confirm PyTorch indexer is actually invoked
+            if not hasattr(self, '_pytorch_indexer_called'):
+                self._pytorch_indexer_called = {'prefill': False, 'decode': False}
+            num_tokens = hidden_states.shape[0] if hidden_states.ndim >= 1 else 0
+            phase = 'prefill' if num_tokens >= 2 else 'decode'
+            if not self._pytorch_indexer_called[phase]:
+                self._pytorch_indexer_called[phase] = True
+                logger.warning(
+                    "[hy4-indexer-pytorch] CALLED %s: hidden_states=%s k=%s "
+                    "attn_metadata_type=%s layer=%s | "
+                    "Confirmed using PyTorch indexer (not MetaX C++ kernel)",
+                    phase.upper(),
+                    tuple(hidden_states.shape),
+                    tuple(k.shape) if k is not None else None,
+                    type(attn_metadata).__name__,
+                    self.k_cache.prefix,
+                )
+
             # Call PyTorch indexer
             topk_indices = self._pytorch_indexer.forward(
                 hidden_states, attn_metadata, k, weights
             )
+
+            # One-shot result log: show topk_indices shape/stats
+            if not getattr(self, '_pytorch_indexer_result_logged', False):
+                self._pytorch_indexer_result_logged = True
+                try:
+                    flat = topk_indices.detach().reshape(-1)
+                    logger.warning(
+                        "[hy4-indexer-pytorch] RESULT: topk_indices=%s/%s "
+                        "min=%s max=%s nonzero=%s numel=%s | sample[:20]=%s",
+                        tuple(topk_indices.shape), topk_indices.dtype,
+                        int(flat.min().item()), int(flat.max().item()),
+                        int((flat != -1).sum().item()), flat.numel(),
+                        flat[:20].tolist(),
+                    )
+                except Exception as re:
+                    logger.warning("[hy4-indexer-pytorch] result log failed: %s", re)
 
             return topk_indices
 
