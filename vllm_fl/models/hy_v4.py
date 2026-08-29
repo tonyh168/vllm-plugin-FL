@@ -502,7 +502,7 @@ class HYV4Model(nn.Module):
             from vllm.forward_context import get_forward_context
             _dbg = (
                 isinstance(getattr(get_forward_context(), "attn_metadata", None), dict)
-                and getattr(HYV4Model, "_hy4_fwd_dbg_n", 0) < 4
+                and getattr(HYV4Model, "_hy4_fwd_dbg_n", 0) < 6
             )
         except Exception:
             _dbg = False
@@ -609,7 +609,20 @@ class HYV4LogitsProcessor(LogitsProcessor):
         # Round 24b: dump the last-token logits argmax to see if lm_head maps the
         # final hidden to the repeated token (garbage) vs a sane distribution.
         try:
-            if (getattr(HYV4ForCausalLM, "_hy4_logit_dbg_n", 0) < 4
+            # Gate on real steps only: without this, vLLM's _dummy_run/profiling
+            # passes (attn_metadata is NOT a dict) consume the debug budget and
+            # report bogus n_tok (e.g. 256). Match [hy4-phase1-hidden] gating so
+            # prefill (n_tok=4) then decode steps (n_tok=1) are captured, which is
+            # where the repeat actually manifests.
+            _real_step = False
+            try:
+                from vllm.forward_context import get_forward_context
+                _real_step = isinstance(
+                    getattr(get_forward_context(), "attn_metadata", None), dict)
+            except Exception:
+                _real_step = False
+            if (_real_step
+                    and getattr(HYV4ForCausalLM, "_hy4_logit_dbg_n", 0) < 6
                     and logits is not None):
                 HYV4ForCausalLM._hy4_logit_dbg_n = getattr(
                     HYV4ForCausalLM, "_hy4_logit_dbg_n", 0) + 1
@@ -638,11 +651,31 @@ class HYV4LogitsProcessor(LogitsProcessor):
                     n_tok = argmax.shape[0]
                     uniq = torch.unique(argmax)
                     logger.warning(
-                        "[hy4-phase1-logits] n_tok=%s | per_pos_argmax "
+                        "[hy4-phase1-logits] PREFILL n_tok=%s | per_pos_argmax "
                         "first8=%s last=%s | num_unique_argmax=%s | "
                         "ALL_SAME(collapse)=%s",
                         n_tok, argmax[:8].tolist(), int(argmax[-1].item()),
                         int(uniq.numel()), bool(uniq.numel() == 1),
+                    )
+                elif lg.dim() == 2 and lg.shape[0] == 1:
+                    # DECODE step: single query token. The repeat manifests here
+                    # -- log the winning id + margin over runner-up each step so
+                    # we can watch the `=?=?` sequence form at the logits level
+                    # and see whether the margin is a confident lock or a
+                    # near-tie (numerical) collapse.
+                    row = lg[0]
+                    t2 = row.topk(min(2, row.numel()))
+                    win = int(t2.indices[0].item())
+                    margin = (float(t2.values[0]) - float(t2.values[1])
+                              if t2.values.numel() > 1 else float("nan"))
+                    hist = getattr(HYV4ForCausalLM, "_hy4_decode_ids", [])
+                    hist.append(win)
+                    HYV4ForCausalLM._hy4_decode_ids = hist
+                    logger.warning(
+                        "[hy4-phase1-logits] DECODE step=%s | win_id=%s "
+                        "margin=%.4f top2_ids=%s top2_vals=%s | seq_so_far=%s",
+                        len(hist), win, margin, t2.indices.tolist(),
+                        [round(v, 3) for v in t2.values.tolist()], hist[-8:],
                     )
         except Exception as _e:
             logger.warning("[hy4-logits] dump failed: %s", _e)
