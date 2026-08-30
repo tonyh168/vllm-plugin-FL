@@ -760,6 +760,62 @@ def _patch_sparse_attn_indexer_for_maca() -> None:
         logger.warning(f"[hy4-paged-mqa] debug hook install failed (ignored): {e}")
 
 
+def _patch_flaggems_sparse_smem_for_metax() -> None:
+    """Shrink flag_gems' flashmla-sparse autotune configs to fit small smem.
+
+    ``flag_gems.fused.flashmla_sparse.triton_flash_mla_sparse_fwd`` natively
+    supports MLA dims (d_qk=576 -> d_v=512) AND attn_sink, but its stock
+    autotune configs use BH=64, whose two fp32 accumulators ``acc0``/``acc1``
+    of shape ``[BH, 256]`` need ~139-204 KiB of shared memory. The MetaX C550
+    exposes only 64 KiB/block, so every stock config aborts with an
+    OutOfResources error (this Triton build raises rather than skipping an
+    over-budget config, so the whole list must fit).
+
+    A single verified-fitting config (BH=16, BK=32, num_stages=1) was measured
+    at cos=1.0 vs a torch reference for MLA sparse + sink on C550 (see
+    models/hy4-metax/test_flaggems_sparse_smem.py in the migration repo). We
+    override the configs at runtime here instead of forking FlagGems, and only
+    on devices that actually need it (smem < 160 KiB/block).
+    """
+    try:
+        import triton
+        from flag_gems.utils import get_device_properties
+        import flag_gems.fused.flashmla_sparse as fms
+    except Exception as e:
+        logger.warning("[hy4-flaggems-smem] flag_gems sparse unavailable: %s", e)
+        return
+
+    try:
+        smem = get_device_properties().shared_memory_per_block
+    except Exception as e:
+        logger.warning("[hy4-flaggems-smem] cannot read smem, skip: %s", e)
+        return
+
+    if smem >= 160 * 1024:
+        return  # big-smem GPU (e.g. NVIDIA); keep the stock BH=64 configs
+
+    kernel = getattr(fms, "triton_flash_mla_sparse_fwd", None)
+    if kernel is None or not hasattr(kernel, "configs"):
+        logger.warning(
+            "[hy4-flaggems-smem] triton_flash_mla_sparse_fwd has no .configs; "
+            "flag_gems layout changed, skipping smem override."
+        )
+        return
+
+    kernel.configs = [
+        triton.Config({"BK": 32, "BH": 16}, num_warps=4, num_stages=1),
+    ]
+    if hasattr(kernel, "cache"):
+        kernel.cache.clear()  # drop any autotune result keyed on old configs
+    logger.warning(
+        "[hy4-flaggems-smem] Overrode flag_gems flashmla-sparse autotune "
+        "configs to BH=16/BK=32/num_stages=1 for smem=%d B/block (< 160 KiB). "
+        "flag_gems.flash_mla_sparse_fwd now fits and natively supports MLA "
+        "576->512 + attn_sink.",
+        smem,
+    )
+
+
 def _patch_flashmla_sparse_for_metax() -> None:
     """Patch FlashMLA sparse decode to use MetaX kernels instead of vllm._flashmla_C.
 
@@ -773,56 +829,80 @@ def _patch_flashmla_sparse_for_metax() -> None:
     if current_platform.is_cuda():
         return  # real NVIDIA, no patch needed
 
+    # Make flag_gems' native sparse-MLA kernel fit this device's smem budget so
+    # it is available as an alternative to the vendor kernel (see helper).
+    _patch_flaggems_sparse_smem_for_metax()
+
     try:
-        from vllm_fl.dispatch.backends.vendor.metax.impl.attention.ops.flashmla import (
-            flash_mla_sparse_prefill,
-        )
+        from flag_gems import flash_mla_sparse_fwd as _fg_flash_mla_sparse_fwd
 
         def _maca_flash_mla_sparse_fwd(
             q, kv, indices, sm_scale, topk_length=None, attn_sink=None
         ):
             """Wrapper matching the native flash_mla_sparse_fwd signature.
 
-            Phase 1 (new_repeat_plan): The -1 sentinel probe
-            (/tmp/probe_sparse_sentinel.py) verified that MetaX's
-            flash_mla_sparse_prefill with indices_all_valid_per_q=None (kernel
-            builds full(False)) CORRECTLY respects -1 padding: rowA(marker)
-            norm=2560, rowB(small)=2.56 (1000x diff). So the default None
-            behavior is CORRECT. The old VLLM_HY4_SPARSE_PASS_VALIDLEN toggle
-            was deleted: passing topk_length (int32 counts) to a bool-semantic
-            arg triggers塌缩 (probe showed all-True collapses rowB to 2560).
+            Phase B (2026-08-30): route HY4 sparse MLA to flag_gems' native
+            ``flash_mla_sparse_fwd`` instead of MetaX's vendor
+            ``flash_mla_sparse_prefill``. The flag_gems Triton kernel supports
+            MLA dims (d_qk=576 -> d_v=512) AND folds ``attn_sink`` into the
+            softmax denominator internally, so the previous vendor-kernel +
+            post-hoc LSE-rescale sink workaround is gone. On the C550 the
+            over-budget BH=64 autotune configs are swapped for BH=16/BK=32 by
+            ``_patch_flaggems_sparse_smem_for_metax`` (called above), which is
+            what makes this kernel fit the 64KB smem budget.
 
-            attn_sink remains dropped here because MetaX wheel's
-            flash_mla_sparse_fwd has NO sink entry (signature has no attn_sink
-            param). Learnable_sink is architecturally disabled on MetaX (not a
-            wire issue, missing kernel capability). thead has it via PPU wheel,
-            hygon via FlagGems sink-capable backend (hy_v4_mla_shims.py).
+            Contract (verified against callers, all take result[0]):
+              - native FlashMLASparseImpl._forward_bf16_kv: no attn_sink.
+              - HYV4FlashMLASparseImpl._bf16_flash_mla_kernel: attn_sink is
+                float32, already padded to h_q (64/128) with -inf on padded
+                lanes (flag_gems treats -inf sink as a no-op), topk_length int32.
 
-            Diagnostic dump (limited to 6 real steps) kept for Phase 2/3.
+            flag_gems requires q/kv/indices contiguous, indices int32, sink
+            fp32; we normalise defensively since ``.view`` upstream can yield a
+            non-contiguous tensor. Returns the flag_gems (out, max_logits, lse)
+            3-tuple so ``[0]`` keeps working.
+
+            Diagnostic dump (limited to 6 real steps) kept for observability.
             """
-            out = flash_mla_sparse_prefill(
-                q, kv, indices, sm_scale,
-                indices_all_valid_per_q=None,  # correct: kernel respects -1
+            q = q.contiguous()
+            kv = kv.contiguous()
+            indices = indices.contiguous()
+            if indices.dtype != torch.int32:
+                indices = indices.to(torch.int32)
+            sink = None
+            if attn_sink is not None:
+                sink = attn_sink.to(torch.float32).contiguous()
+            tlen = None
+            if topk_length is not None:
+                tlen = topk_length.to(torch.int32).contiguous()
+
+            result = _fg_flash_mla_sparse_fwd(
+                q, kv, indices, float(sm_scale),
+                d_v=512,
+                attn_sink=sink,
+                topk_length=tlen,
             )
+            sink_applied = sink is not None
 
             n = getattr(_maca_flash_mla_sparse_fwd, "_dbg_n", 0)
             if n < 6:
                 _maca_flash_mla_sparse_fwd._dbg_n = n + 1
                 try:
-                    o = out[0] if isinstance(out, (tuple, list)) else out
+                    o = result[0] if isinstance(result, (tuple, list)) else result
                     # per-row valid index count (indices: [s_q, 1, topk])
                     idx2d = indices.reshape(indices.shape[0], -1)
                     valid_per_row = (idx2d >= 0).sum(dim=1)
                     last_out = o.reshape(o.shape[0], -1)[-1].float()
                     logger.warning(
                         "[hy4-mla-kernel] q=%s/%s indices=%s sm_scale=%s | "
-                        "DROPPED topk_length=%s attn_sink=%s (valid_arg=None,correct) | "
+                        "topk_length=%s attn_sink=%s SINK_APPLIED=%s (valid_arg=None) | "
                         "valid_per_row[first3]=%s [last]=%s (topk=%s) | "
                         "out=%s/%s out_norm_per_tok[first]=%.4f [last]=%.4f "
                         "last_out_isnan=%s isinf=%s",
                         tuple(q.shape), q.dtype, tuple(indices.shape), sm_scale,
                         None if topk_length is None else tuple(topk_length.shape),
                         None if attn_sink is None else tuple(attn_sink.shape),
+                        sink_applied,
                         valid_per_row[:3].tolist(),
                         int(valid_per_row[-1].item()), idx2d.shape[1],
                         tuple(o.shape), o.dtype,
@@ -833,7 +913,7 @@ def _patch_flashmla_sparse_for_metax() -> None:
                     )
                 except Exception as _e:
                     logger.warning("[hy4-mla-kernel] dump failed: %s", _e)
-            return out
+            return result
 
         # Patch the ops module so any code importing from there gets MetaX version
         import vllm.v1.attention.ops.flashmla as flashmla_ops

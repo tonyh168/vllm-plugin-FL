@@ -75,6 +75,20 @@ def _try_load_mxfp8_indexer_wk(
     if not is_weight and not is_scale:
         return False
 
+    # DIAGNOSTIC (2026-08-30): thead's migration has no MXFP8 indexer-wk branch,
+    # so on a BF16/FP8 checkpoint this path should never fire. Log once the first
+    # time a genuine MXFP8 indexer.wk tensor is seen so we can confirm from the
+    # load-time logs whether this checkpoint actually exercises the MXFP8 fusion.
+    # If it turns out this must never trigger, replace this with an assert.
+    logger.warning_once(
+        "[hy4-mxfp8-indexer] MXFP8 indexer.wk tensor detected (name=%s, "
+        "dtype=%s) -> _try_load_mxfp8_indexer_wk fusion path IS active. If "
+        "this checkpoint is expected to be BF16/FP8 (like thead), this branch "
+        "should not run.",
+        name,
+        tensor.dtype,
+    )
+
     layer_prefix = name.rsplit(".wk.", 1)[0]
     if any(name.startswith(prefix) for prefix in pp_missing_layer_names):
         return True
