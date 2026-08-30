@@ -886,8 +886,12 @@ def _patch_flashmla_sparse_for_metax() -> None:
             )
             sink_applied = sink is not None
 
+            # DEBUG DUMP DISABLED (2026-08-30): the [hy4-mla-kernel] per-call
+            # tensor dump flooded the server log. Budget forced to 0 so it never
+            # fires; raise it back to enable for targeted debugging.
+            _MLA_KERNEL_DBG_BUDGET = 0
             n = getattr(_maca_flash_mla_sparse_fwd, "_dbg_n", 0)
-            if n < 6:
+            if n < _MLA_KERNEL_DBG_BUDGET:
                 _maca_flash_mla_sparse_fwd._dbg_n = n + 1
                 try:
                     o = result[0] if isinstance(result, (tuple, list)) else result

@@ -711,11 +711,15 @@ class HYV4MLAAttention(nn.Module):
         attn_out = torch.empty(
             output_shape, dtype=hidden_states.dtype, device=hidden_states.device
         )
-        _dbg = (
-            self.layer_id == 0
-            and getattr(HYV4MLAAttention, "_hy4_dbg_n", 0) < _HY4_DBG_MAX
-            and _hy4_is_real_step()
-        )
+        # DEBUG DUMPS DISABLED (2026-08-30): the [hy4-attn] L0 datapath tensor
+        # dumps flooded the server log. Hard-gated off; restore the condition
+        # below for targeted debugging.
+        _dbg = False
+        # _dbg = (
+        #     self.layer_id == 0
+        #     and getattr(HYV4MLAAttention, "_hy4_dbg_n", 0) < _HY4_DBG_MAX
+        #     and _hy4_is_real_step()
+        # )
         if _dbg:
             HYV4MLAAttention._hy4_dbg_n = getattr(HYV4MLAAttention, "_hy4_dbg_n", 0) + 1
             _hy4_dbg_tensor("L0.in hidden", hidden_states)

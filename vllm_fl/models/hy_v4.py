@@ -511,15 +511,19 @@ class HYV4Model(nn.Module):
         # Round 24b: trace the multi-stream residual across layers. L0 attention
         # was verified healthy, so the garbage is either accumulating across
         # layers or in the hc_head merge / final norm. Only on real steps, capped.
+        # DEBUG DUMPS DISABLED (2026-08-30): the [hy4-fwd] per-layer stream dumps
+        # and [hy4-phase1-hidden] cosine probe below flooded the server log with
+        # intermediate tensor stats. Hard-gated off; flip _dbg back to the block
+        # below only for targeted debugging.
         _dbg = False
-        try:
-            from vllm.forward_context import get_forward_context
-            _dbg = (
-                isinstance(getattr(get_forward_context(), "attn_metadata", None), dict)
-                and getattr(HYV4Model, "_hy4_fwd_dbg_n", 0) < 6
-            )
-        except Exception:
-            _dbg = False
+        # try:
+        #     from vllm.forward_context import get_forward_context
+        #     _dbg = (
+        #         isinstance(getattr(get_forward_context(), "attn_metadata", None), dict)
+        #         and getattr(HYV4Model, "_hy4_fwd_dbg_n", 0) < 6
+        #     )
+        # except Exception:
+        #     _dbg = False
         if _dbg:
             HYV4Model._hy4_fwd_dbg_n = getattr(HYV4Model, "_hy4_fwd_dbg_n", 0) + 1
 
@@ -628,13 +632,16 @@ class HYV4LogitsProcessor(LogitsProcessor):
             # report bogus n_tok (e.g. 256). Match [hy4-phase1-hidden] gating so
             # prefill (n_tok=4) then decode steps (n_tok=1) are captured, which is
             # where the repeat actually manifests.
+            # DEBUG DUMPS DISABLED (2026-08-30): [hy4-logits]/[hy4-phase1-logits]
+            # argmax/top-k probes are diagnostic-only. Hard-gated off; restore the
+            # block below for targeted debugging.
             _real_step = False
-            try:
-                from vllm.forward_context import get_forward_context
-                _real_step = isinstance(
-                    getattr(get_forward_context(), "attn_metadata", None), dict)
-            except Exception:
-                _real_step = False
+            # try:
+            #     from vllm.forward_context import get_forward_context
+            #     _real_step = isinstance(
+            #         getattr(get_forward_context(), "attn_metadata", None), dict)
+            # except Exception:
+            #     _real_step = False
             if (_real_step
                     and getattr(HYV4ForCausalLM, "_hy4_logit_dbg_n", 0) < 6
                     and logits is not None):
