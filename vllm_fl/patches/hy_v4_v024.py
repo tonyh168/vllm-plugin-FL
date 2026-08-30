@@ -946,104 +946,93 @@ def _patch_flashmla_sparse_for_metax() -> None:
         except (ImportError, AttributeError):
             pass
 
-        # Round 24c (moved from a local vllm edit so it propagates to every ray
-        # rank via git, not just the head node): wrap _forward_bf16_kv to dump
-        # the per-request topk valid-count BEFORE vs AFTER
-        # triton_convert_req_index_to_global_index. The indexer emits correct
-        # causal top-k (round 21), but [hy4-mla-kernel] saw the CONVERTED indices
-        # collapse to mostly -1 (valid_per_row=[1,0,1,...,0]). This probe tells us
-        # whether the global-slot conversion is what destroys the indices on MetaX.
-        try:
-            from vllm.v1.attention.backends.mla.flashmla_sparse import (
-                FlashMLASparseImpl,
-            )
-
-            if not getattr(FlashMLASparseImpl, "_hy4_convert_wrapped", False):
-                _orig_bf16 = FlashMLASparseImpl._forward_bf16_kv
-
-                def _wrapped_forward_bf16_kv(
-                    self, q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
-                ):
-                    n = getattr(FlashMLASparseImpl, "_hy4_cv_dbg_n", 0)
-                    if n < 4:
-                        try:
-                            import torch as _t
-                            # Round 24e: decisive H1 (write/read race) test. Read
-                            # the SAME buffer slice twice: (1) NO sync — how the
-                            # downstream triton kernel actually sees it; (2) after
-                            # an explicit device sync — the settled value. If (1)
-                            # is [1,0,1,0] but (2) becomes [1,2,3,4], the indexer
-                            # write is not ordered before this read on MetaX =>
-                            # race confirmed, fix = barrier the indexer op.
-                            in2d = topk_indices.reshape(topk_indices.shape[0], -1)
-                            valid_nosync = (in2d >= 0).sum(dim=1)[:6].tolist()
-                            if _t.cuda.is_available():
-                                _t.cuda.synchronize()
-                            valid_synced = (
-                                (topk_indices.reshape(topk_indices.shape[0], -1) >= 0)
-                                .sum(dim=1)[:6].tolist()
-                            )
-                            # also snapshot first row's first 12 cols post-sync
-                            row_sample = (
-                                topk_indices.reshape(topk_indices.shape[0], -1)[:2, :12]
-                                .detach().cpu().tolist()
-                            )
-                            logger.warning(
-                                "[hy4-convert] BEFORE topk_indices=%s "
-                                "valid_NOSYNC[:6]=%s valid_SYNCED[:6]=%s "
-                                "row_sample[:2,:12]=%s min=%s max=%s | "
-                                "req_id_per_token=%s block_table=%s block_size=%s",
-                                tuple(topk_indices.shape),
-                                valid_nosync, valid_synced, row_sample,
-                                int(in2d.min().item()), int(in2d.max().item()),
-                                tuple(attn_metadata.req_id_per_token.shape),
-                                tuple(attn_metadata.block_table.shape),
-                                attn_metadata.block_size,
-                            )
-                        except Exception as _e:
-                            logger.warning("[hy4-convert] BEFORE dump failed: %s", _e)
-
-                    out = _orig_bf16(
-                        self, q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
-                    )
-
-                    # Re-run only the conversion to observe its output (cheap;
-                    # the real one already ran inside _orig_bf16). Guarded + capped.
-                    if n < 4:
-                        FlashMLASparseImpl._hy4_cv_dbg_n = n + 1
-                        try:
-                            from vllm.v1.attention.backends.mla.sparse_utils import (
-                                triton_convert_req_index_to_global_index,
-                            )
-                            conv_idx, conv_len = (
-                                triton_convert_req_index_to_global_index(
-                                    attn_metadata.req_id_per_token,
-                                    attn_metadata.block_table,
-                                    topk_indices,
-                                    BLOCK_SIZE=attn_metadata.block_size,
-                                    NUM_TOPK_TOKENS=topk_indices.shape[1],
-                                    return_valid_counts=True,
-                                )
-                            )
-                            o2d = conv_idx.reshape(conv_idx.shape[0], -1)
-                            o_valid = (o2d >= 0).sum(dim=1)
-                            logger.warning(
-                                "[hy4-convert] AFTER topk_indices=%s "
-                                "valid_per_row[:6]=%s topk_length[:6]=%s "
-                                "min=%s max=%s",
-                                tuple(conv_idx.shape), o_valid[:6].tolist(),
-                                conv_len[:6].tolist() if conv_len is not None else None,
-                                int(o2d.min().item()), int(o2d.max().item()),
-                            )
-                        except Exception as _e:
-                            logger.warning("[hy4-convert] AFTER dump failed: %s", _e)
-                    return out
-
-                FlashMLASparseImpl._forward_bf16_kv = _wrapped_forward_bf16_kv
-                FlashMLASparseImpl._hy4_convert_wrapped = True
-                logger.warning("[hy4-convert] wrapped _forward_bf16_kv for probe")
-        except Exception as _e:
-            logger.warning("[hy4-convert] wrap install failed (ignored): %s", _e)
+        # [hy4-convert] DEBUG PROBE DISABLED (2026-08-30): the block below wrapped
+        # FlashMLASparseImpl._forward_bf16_kv purely to dump BEFORE/AFTER topk
+        # valid-count diagnostics (and re-ran the index conversion an extra time).
+        # It produced the noisy per-step WARNING spam and has no functional effect,
+        # so it is commented out. Re-enable only for targeted debugging.
+        #
+        # try:
+        #     from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        #         FlashMLASparseImpl,
+        #     )
+        #
+        #     if not getattr(FlashMLASparseImpl, "_hy4_convert_wrapped", False):
+        #         _orig_bf16 = FlashMLASparseImpl._forward_bf16_kv
+        #
+        #         def _wrapped_forward_bf16_kv(
+        #             self, q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+        #         ):
+        #             n = getattr(FlashMLASparseImpl, "_hy4_cv_dbg_n", 0)
+        #             if n < 4:
+        #                 try:
+        #                     import torch as _t
+        #                     in2d = topk_indices.reshape(topk_indices.shape[0], -1)
+        #                     valid_nosync = (in2d >= 0).sum(dim=1)[:6].tolist()
+        #                     if _t.cuda.is_available():
+        #                         _t.cuda.synchronize()
+        #                     valid_synced = (
+        #                         (topk_indices.reshape(topk_indices.shape[0], -1) >= 0)
+        #                         .sum(dim=1)[:6].tolist()
+        #                     )
+        #                     row_sample = (
+        #                         topk_indices.reshape(topk_indices.shape[0], -1)[:2, :12]
+        #                         .detach().cpu().tolist()
+        #                     )
+        #                     logger.warning(
+        #                         "[hy4-convert] BEFORE topk_indices=%s "
+        #                         "valid_NOSYNC[:6]=%s valid_SYNCED[:6]=%s "
+        #                         "row_sample[:2,:12]=%s min=%s max=%s | "
+        #                         "req_id_per_token=%s block_table=%s block_size=%s",
+        #                         tuple(topk_indices.shape),
+        #                         valid_nosync, valid_synced, row_sample,
+        #                         int(in2d.min().item()), int(in2d.max().item()),
+        #                         tuple(attn_metadata.req_id_per_token.shape),
+        #                         tuple(attn_metadata.block_table.shape),
+        #                         attn_metadata.block_size,
+        #                     )
+        #                 except Exception as _e:
+        #                     logger.warning("[hy4-convert] BEFORE dump failed: %s", _e)
+        #
+        #             out = _orig_bf16(
+        #                 self, q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+        #             )
+        #
+        #             if n < 4:
+        #                 FlashMLASparseImpl._hy4_cv_dbg_n = n + 1
+        #                 try:
+        #                     from vllm.v1.attention.backends.mla.sparse_utils import (
+        #                         triton_convert_req_index_to_global_index,
+        #                     )
+        #                     conv_idx, conv_len = (
+        #                         triton_convert_req_index_to_global_index(
+        #                             attn_metadata.req_id_per_token,
+        #                             attn_metadata.block_table,
+        #                             topk_indices,
+        #                             BLOCK_SIZE=attn_metadata.block_size,
+        #                             NUM_TOPK_TOKENS=topk_indices.shape[1],
+        #                             return_valid_counts=True,
+        #                         )
+        #                     )
+        #                     o2d = conv_idx.reshape(conv_idx.shape[0], -1)
+        #                     o_valid = (o2d >= 0).sum(dim=1)
+        #                     logger.warning(
+        #                         "[hy4-convert] AFTER topk_indices=%s "
+        #                         "valid_per_row[:6]=%s topk_length[:6]=%s "
+        #                         "min=%s max=%s",
+        #                         tuple(conv_idx.shape), o_valid[:6].tolist(),
+        #                         conv_len[:6].tolist() if conv_len is not None else None,
+        #                         int(o2d.min().item()), int(o2d.max().item()),
+        #                     )
+        #                 except Exception as _e:
+        #                     logger.warning("[hy4-convert] AFTER dump failed: %s", _e)
+        #             return out
+        #
+        #         FlashMLASparseImpl._forward_bf16_kv = _wrapped_forward_bf16_kv
+        #         FlashMLASparseImpl._hy4_convert_wrapped = True
+        #         logger.warning("[hy4-convert] wrapped _forward_bf16_kv for probe")
+        # except Exception as _e:
+        #     logger.warning("[hy4-convert] wrap install failed (ignored): %s", _e)
 
         logger.info(
             "Patched FlashMLA sparse decode to use MetaX flash_mla kernels"
