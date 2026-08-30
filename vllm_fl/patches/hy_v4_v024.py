@@ -833,6 +833,8 @@ def _patch_flashmla_sparse_for_metax() -> None:
     # it is available as an alternative to the vendor kernel (see helper).
     _patch_flaggems_sparse_smem_for_metax()
 
+    import torch  # module has no top-level torch import; keep it function-local
+
     try:
         from flag_gems import flash_mla_sparse_fwd as _fg_flash_mla_sparse_fwd
 
