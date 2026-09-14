@@ -52,6 +52,24 @@ op_backends:
 # Blacklist only ops that are known to have issues
 flagos_blacklist:
   - cat
+  - to_copy
+  - _to_copy
+  - copy_
+  - index
+  - slice
+  - pad
+  - bmm_out
+  - to
+  - index_put_
+  - index_put
+  - _index_put_impl_
+  - sort
+  - cumsum
+  - softmax
+  - exponential_
+  - argmax
+  - scatter
+  - linear
 
 # OOT (Out-of-Tree) operator blacklist
 # These operators will NOT be registered as OOT replacements.
