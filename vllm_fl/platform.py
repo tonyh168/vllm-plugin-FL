@@ -68,6 +68,16 @@ class PlatformFL(Platform):
     dispatch_key = device_info.dispatch_key
     torch_device_fn = device_info.torch_device_fn
     ray_device_key: str = "GPU"
+
+    # MetaX: 让 Ray 不要给每个 worker actor 单独设 CUDA_VISIBLE_DEVICES。
+    # 基类 interface.Platform 的默认值是 [],只有 CudaPlatform 才带值;PlatformFL 继承
+    # interface.Platform,不自己声明的话 Ray 会把每个 actor 的可见卡收成 1 张,
+    # worker 里的 local_rank 索引随之错位(跨机 multi-node 尤其明显)。hy4 跨机同此修复。
+    ray_noset_device_env_vars: list[str] = (
+        ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"]
+        if device_info.device_type == "cuda"
+        else []
+    )
     dist_backend: str = (
         "flagcx" if "FLAGCX_PATH" in os.environ else dist_backend_dict.get(device_name, "nccl")
     )
