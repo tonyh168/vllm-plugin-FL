@@ -145,9 +145,52 @@ constraint), showing `ValueError: GLM5 indexer storage 16 must align to 64` at
 
 ## Status
 
-- Startup: works with the device-pin mitigation described above.
-- Inference: blocked by the `make_nv_mma_shared_encoding_attr` gap in the FlagGems
-  sparse-MLA kernel.
-- Suggestions: make the early `set_device` the non-NVIDIA default in vLLM's
-  `worker_main`; add a `ncclCommAbort` fallback where MCCL wrappers are registered
-  (done here).
+Day-0 smoke check **passes** on 2 nodes × 8× MetaX C550 (TP16, eager):
+
+```
+问:中国的首都是哪个城市呢？答:应该是  ->  北京。北京。北京是中国的首都
+```
+
+8/8 runs consistent, plus `What is the capital of France?` → ` Paris`.
+
+Three things were needed, in this order:
+
+1. **This branch** — keep the GLM5 compressed-indexer block size valid, and stop
+   `MCCLLibrary` from masking real errors behind an `AttributeError`.
+2. **`tonyh168/FlagGems-vllm`, branch `fix/glm5-metax-causal-conv-tile`** —
+   replace `tl.gather(axis=1)` in `causal_conv1d` (it lowers to `maca.shfl.sync`,
+   which the MACA backend does not implement) and add sparse-MLA tile presets that
+   fit in 64 KB of shared memory instead of requiring ~160 KB.
+3. **Device pinning in `vllm/v1/executor/multiproc_executor.py::worker_main()`**
+   (vLLM core, not in this repo) — `torch.cuda.set_device(local_rank)` before any
+   CUDA call, so GPU 0 stops accumulating one empty context per worker.
+
+### Remaining caveat
+
+The model answers the day-0 prompt but degrades after a few tokens
+(`1+1` → `1+1等于2,1+1等于3,`; self-introduction turns into an enumerated loop).
+That is an accuracy question rather than a startup/compile one, and it is not
+addressed here.
+
+### Suggestions
+
+- Make the early `set_device` the non-NVIDIA default in vLLM's `worker_main`.
+- `ncclCommAbort` fallback where MCCL wrappers are registered (done in this branch).
+- FlagGems gates the flashmla / chunk_gdr TLE switches on a hardcoded default of
+  `"1"` instead of `runtime.device.info.tle_enabled`, which already reports `False`
+  on MetaX. `top_k_per_row_*` consults that probe correctly; the flashmla and
+  chunk-gdr families do not. `FLAGGEMS_FLASHMLA_SPARSE_TLE=0` is worked around
+  locally in the launch script.
+
+## Branch / commit
+
+| Repository | Branch | Commit | Contents |
+|---|---|---|---|
+| `tonyh168/vllm-plugin-FL` | `fix/glm5-metax-indexer-block-size-mccl-abort` | see this branch | `vllm_fl/platform.py` indexer block-size alignment, `pynccl_wrapper.py` `ncclCommAbort` |
+| `tonyh168/vllm-plugin-FL` | `fix/glm5-metax-indexer-block-size-mccl-abort-day0` | `3da1de1` | same fixes on top of the full day-0 tree (+80 commits / 68 files) |
+| `tonyh168/FlagGems-vllm` | `fix/glm5-metax-causal-conv-tile` | `1c40d46` | `causal_conv1d.py` gather replacement, `flashmla_sparse.py` tile presets, its own `pr_content.md` |
+
+Base for both repositories is upstream `main` (`flagos-ai`), so the diffs stay
+reviewable: this branch is +3 files / +231 lines, the FlagGems branch is
++3 files / +173 lines / -6 lines.
+
