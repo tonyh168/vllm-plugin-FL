@@ -429,6 +429,18 @@ class MCCLLibrary:
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["mcclCommDestroy"](comm))
 
+    def ncclCommAbort(self, comm: ncclComm_t) -> None:
+        # MCCL has no ncclCommAbort: neither a method here nor a symbol in
+        # the library. pynccl calls it from its error-teardown path, so the
+        # missing attribute raised AttributeError and hid the real failure.
+        # Degrade to destroy; stay quiet if neither symbol exists.
+        func = self._funcs.get("mcclCommAbort") or self._funcs.get(
+            "mcclCommDestroy"
+        )
+        if func is None:
+            return
+        func(comm)
+
     def ncclGroupStart(self) -> None:
         self.NCCL_CHECK(self._funcs["mcclGroupStart"]())
 
