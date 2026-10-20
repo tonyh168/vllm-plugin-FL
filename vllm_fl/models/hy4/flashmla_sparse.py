@@ -165,7 +165,19 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         # (rather than caching a padded copy at construction time) keeps the
         # values correct for weights loaded after the module is built, and the
         # allocation plus copy are captured in the CUDA graph.
-        padded_sinks = sinks.new_full((kernel_heads,), float("-inf"))
+        # --- cudagraph pad buffers (fixed) ---
+        # 持久 buffer：同一 (numel, device, dtype) 复用同一块内存，否则 cudagraph
+        # 重放会写到捕获时的旧地址，而调用方拿到的是新分配的未初始化内存。
+        # --- pad-trace-fix v2 ---
+        # 缓存查找在 Python 侧；所有写入无条件执行且是 in-place 图节点，
+        # 保证一定被 trace 进图、重放时真正执行。
+        _cache = self.__dict__.setdefault("_padded_sinks_cache", {})
+        _key = (int(kernel_heads), str(sinks.device), str(sinks.dtype))
+        padded_sinks = _cache.get(_key)
+        if padded_sinks is None:
+            padded_sinks = sinks.new_empty((kernel_heads,))
+            _cache[_key] = padded_sinks
+        padded_sinks.fill_(float("-inf"))   # 无条件：padded lanes 每次重置为 -inf
         padded_sinks[:query_heads] = sinks
         return padded_sinks
 
@@ -187,7 +199,16 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
                 f"Padding num_heads from {actual_num_heads} to "
                 f"{padded_num_heads} for FP8 sparse decode kernel"
             )
-            q_padded = q.new_zeros((q.size(0), q.size(1), padded_num_heads, q.size(3)))
+            # --- cudagraph pad buffers (fixed) ---
+            # --- pad-trace-fix v2 ---
+            _shape = (q.size(0), q.size(1), padded_num_heads, q.size(3))
+            _cache = self.__dict__.setdefault("_q_pad_fp8_cache", {})
+            _key = (tuple(_shape), str(q.device), str(q.dtype))
+            q_padded = _cache.get(_key)
+            if q_padded is None:
+                q_padded = q.new_empty(_shape)
+                _cache[_key] = q_padded
+            q_padded.zero_()                    # 无条件：padded lanes 每次归零
             q_padded[:, :, :actual_num_heads, :] = q
             q = q_padded
 
@@ -237,7 +258,16 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             # Zero (not new_empty) the padded lanes: topk_indices is shared by
             # all heads, so the kernel reduces across the head group and NaNs
             # from uninitialized memory would leak into the real heads.
-            q_padded = q.new_zeros((q.shape[0], self.prefill_padding, q.shape[2]))
+            # --- cudagraph pad buffers (fixed) ---
+            # --- pad-trace-fix v2 ---
+            _shape = (q.shape[0], self.prefill_padding, q.shape[2])
+            _cache = self.__dict__.setdefault("_q_pad_bf16_cache", {})
+            _key = (tuple(_shape), str(q.device), str(q.dtype))
+            q_padded = _cache.get(_key)
+            if q_padded is None:
+                q_padded = q.new_empty(_shape)
+                _cache[_key] = q_padded
+            q_padded.zero_()                    # 无条件：padded lanes 每次归零
             q_padded[:, : self.num_heads, :] = q
             q = q_padded
 
