@@ -28,6 +28,7 @@ In theory, vllm-plugin-FL can support all models available in vLLM, as long as n
 | Qwen3-Next-80B-A3B | Supported | [example](./examples/qwen3_next_offline_inference.py) |
 | Qwen3-4B | Supported | [example](./examples/offline_inference.py) |
 | MiniCPM-o 4.5 | Supported | [example](./examples/minicpm/) |
+| MiniCPM-OCR | Validated on NVIDIA H100 | [usage](#minicpm-ocr) |
 | GLM-5 | Supported | [example](./examples/glm_5_offline_inference.py) |
 | Qwen3.5-35B-A3B | Supported | [example](./examples/qwen3_5_offline_inference.py)  |
 | BAAI/bge-m3 | Supported | [implementation](./vllm_fl/models/bge_m3.py) |
@@ -258,6 +259,54 @@ The shared CachedOp prewarming from
 used after model loading. Whole-model Dynamo compilation remains limited
 by the current FlagGems `libentry` implementation; CUDA Graph mode `NONE`
 and eager execution remain available.
+
+### MiniCPM-OCR
+
+The OCR adapter reuses vLLM's MiniCPM-V 4.6 vision/language implementation
+and the Transformers image/video processors. It supplies OCR-specific grid
+geometry, adaptive image resizing, checkpoint config registration, fused
+vision-merger weight loading, and mixed 4x/16x image batching without editing
+vLLM. Image and video modes share the OCR geometry implementation.
+
+Use Transformers 5.12.1 (the tested version) with vLLM 0.24.0. The adapter
+requires the Transformers MiniCPM-V 4.6 classes; older installations without
+these classes leave OCR registration disabled. Adaptive resizing additionally
+requires OpenCV (`opencv-python-headless`). Build the plugin native extension
+with `VLLM_VENDOR=cuda` when using an empty vLLM installation, as described
+above; a prebuilt extension is not included in the source repository.
+
+For a local MiniCPM-OCR checkpoint:
+
+```bash
+VLLM_PLUGINS=fl vllm serve /path/to/MiniCPM-OCR \
+  --mm-encoder-attn-backend TORCH_SDPA \
+  --max-model-len 262144 \
+  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+```
+
+On the tested empty CUDA build, `TORCH_SDPA` selects the vision attention
+interface because the native FlashAttention extension is unavailable. Normal
+FlagOS operator dispatch still applies. Add `--enforce-eager` and omit the
+compilation configuration for eager diagnostics. Pass `downsample_mode` as
+`4x` (default) or `16x` through `mm_processor_kwargs`; image-only options include
+`disable_small_image_upsize` and `adaptive_small_image_upsize`.
+
+Focused processor and registration tests:
+
+```bash
+VLLM_PLUGINS=fl python3 -m pytest tests/unit_tests/models/test_minicpm_ocr.py
+```
+
+The validation environment used FlagGems commit
+`8200f71f51d784d54a5a51019cb955acb74d64c1` with a local attention-mask
+broadcasting fix for the resampler, FlagGems-vllm commit
+`fa78ddee4c3e78ce5047213ff0ef02acff34b2d5`, and FlagTree 0.7.0. The FlagGems
+fix belongs to that library and is not included in this plugin change.
+
+Validation covers BF16 text, image, mixed-image and video requests on H100,
+processor output equality, and eager/graph token consistency. Other hardware,
+formal accuracy/performance evaluation, tensor parallelism, and a request at
+the full 262144-token boundary have not been validated for this adapter.
 
 ### Run a Task
 

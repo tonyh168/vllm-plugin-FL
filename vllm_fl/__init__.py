@@ -220,6 +220,10 @@ def register_model():
     """Register FL-specific models not yet upstream."""
     _patch_ascend_torch_accelerator()
 
+    from vllm_fl.models.minicpm_ocr.registration import register_minicpm_ocr_support
+
+    register_minicpm_ocr_support()
+
     # General plugins are loaded independently in spawned model-inspection and
     # worker processes, so all runtime compatibility hooks must be idempotent.
     from vllm_fl.patches.qwen3_5_text import apply_qwen3_5_text_patches
