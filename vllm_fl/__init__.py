@@ -267,6 +267,15 @@ def register_model():
     register_quant_linear()
     register_router()
 
+    # Jev / OCR-RM-2B: Qwen3.5-VL + LAST-pooled score head (sequence classification).
+    # vLLM ships every piece but not this combination; see
+    # vllm_fl/models/qwen3_5_seqcls.py.
+    from vllm import ModelRegistry
+    ModelRegistry.register_model(
+        "Qwen3_5ForSequenceClassification",
+        "vllm_fl.models.qwen3_5_seqcls:Qwen3_5ForSequenceClassification",
+    )
+
     _register_gdn_packed_decode_patch()
 
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
