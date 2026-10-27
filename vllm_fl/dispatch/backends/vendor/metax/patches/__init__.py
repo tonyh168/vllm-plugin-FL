@@ -8,6 +8,7 @@ from . import chunk_delta_h
 from . import topk_topp_sampler
 from . import gdn_linear_attn  # noqa: F401 — register MacaGatedDeltaNetAttention
 from . import int8_quant  # noqa: F401 — portable dynamic INT8 quantization for W8A8
+from . import int8_linear  # noqa: F401 — keep the INT8 Triton scaled-mm opaque to dynamo
 from . import mla_safe_tiles  # noqa: F401 — fit sparse MLA prefill into 64 KB smem
 
 # --------------------------------------------------
