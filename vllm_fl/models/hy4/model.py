@@ -460,7 +460,13 @@ class HYV4DecoderLayer(nn.Module):
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
-        "positions": 0,
+        # ``positions`` is (num_tokens,) for text and (3, num_tokens) once
+        # mrope is in play, so the token axis is the *last* one — marking dim 0
+        # would leave the token axis static and dynamo then specializes the
+        # dynamic token dim while building guards
+        # (ConstraintViolationError: L['inputs_embeds'].size()[0] ... 8192).
+        # Matches upstream qwen3_vl.
+        "positions": -1,
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
     }
