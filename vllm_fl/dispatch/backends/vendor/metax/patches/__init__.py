@@ -10,6 +10,7 @@ from . import gdn_linear_attn  # noqa: F401 — register MacaGatedDeltaNetAttent
 from . import int8_quant  # noqa: F401 — portable dynamic INT8 quantization for W8A8
 from . import int8_linear  # noqa: F401 — keep the INT8 Triton scaled-mm opaque to dynamo
 from . import graph_eager_sync  # noqa: F401 — MCCL: sync after the eager logits all-gather
+from . import graph_sync_every_replay  # noqa: F401 — diagnostic for the MCCL graph deadlock
 from . import mla_safe_tiles  # noqa: F401 — fit sparse MLA prefill into 64 KB smem
 
 # --------------------------------------------------
