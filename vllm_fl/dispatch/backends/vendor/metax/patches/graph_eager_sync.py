@@ -62,17 +62,14 @@ def _enabled() -> bool:
         return False
     if raw in ("1", "true", "yes", "on"):
         return True
-    # auto: only when some cudagraph mode is active
-    try:
-        from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
-
-        cfg = get_current_vllm_config_or_none()
-        if cfg is None:
-            return False
-        mode = cfg.compilation_config.cudagraph_mode
-        return mode is not None and mode != CUDAGraphMode.NONE
-    except Exception:  # noqa: BLE001 - config not ready / older torch
-        return False
+    # auto: "compilation is on" is the practical signal for "a cudagraph mode may
+    # be active". ``get_current_vllm_config_or_none()`` is useless here — the vLLM
+    # config is a context-local and is *not* set on the model-forward path, so it
+    # returns None and the sync would silently never run (verified 2026-10-28:
+    # first version of this patch was a no-op for exactly this reason).
+    # Our launch scripts set TORCH_COMPILE_DISABLE=1 for eager mode, so this
+    # still keeps the sync off where there is no graph to replay.
+    return os.environ.get("TORCH_COMPILE_DISABLE") != "1"
 
 
 def _install() -> bool:
