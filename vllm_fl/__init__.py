@@ -42,6 +42,10 @@ def _patch_transformers_compat():
         cfg.ALLOWED_LAYER_TYPES = getattr(
             cfg, "ALLOWED_ATTENTION_LAYER_TYPES", ()
         )
+    # GLM-5-Next 使用 DeepSeek sparse-attention layer type。
+    extra = ("deepseek_sparse_attention",)
+    if not all(x in cfg.ALLOWED_LAYER_TYPES for x in extra):
+        cfg.ALLOWED_LAYER_TYPES = tuple(cfg.ALLOWED_LAYER_TYPES) + extra
 
 
 def _register_flagcx_connector():
@@ -95,6 +99,14 @@ def _patch_custom_ops():
     register_op_schemas()
 
 
+def _prebind_flashinfer_cudart() -> None:
+    """在 tilelang stub 加载前绑定 flashinfer 的真实 CUDA runtime。"""
+    try:
+        import flashinfer.comm.cuda_ipc  # noqa: F401
+    except ImportError:
+        logger.debug("flashinfer.comm.cuda_ipc not available; skipping pre-bind")
+
+
 def register():
     """Register the FL platform."""
     _patch_custom_ops()
@@ -138,11 +150,31 @@ def register_router():
 
 def register_model():
     """Register FL-specific models not yet upstream."""
+    # Qwen3.5/Qwen3.8 text-only compatibility patches.  Idempotent because
+    # general plugins are loaded independently in spawned worker processes.
+    from vllm_fl.patches.qwen3_5_v024 import apply_qwen3_5_v024_patches
+
+    apply_qwen3_5_v024_patches()
+
+    _prebind_flashinfer_cudart()
+    from vllm_fl.patches.glm5_next_v024 import apply_glm5_next_v024_patches
+
+    apply_glm5_next_v024_patches()
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them
     register_quant_linear()
     register_router()
+
+    # Block-wise FP8 MoE (DeepSeek/GLM checkpoints) has no in-tree backend on
+    # OOT platforms; route it to the FlagGems experts implementation.
+    try:
+        from vllm_fl.quantization.fp8_moe import install_fl_fp8_moe_selector
+
+        install_fl_fp8_moe_selector()
+    except Exception as e:
+        logger.error(f"Install FP8 MoE selector error: {str(e)}")
 
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
     try:
