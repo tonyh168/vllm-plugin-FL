@@ -49,6 +49,46 @@ class TritonFp8ExpertsFL(TritonExperts):
         # CUDA-alike/XPU via torch's canned list.
         return True
 
+    @classmethod
+    def is_supported_config(
+        cls,
+        moe_config,
+        weight_key,
+        activation_key,
+        activation_format,
+    ) -> tuple[bool, str | None]:
+        """Accept the block-wise FP8 scheme the in-tree Triton kernel rejects.
+
+        Everything is inherited from ``FusedMoEExperts`` except the device gate
+        (the FlagGems path runs wherever ``flag_gems.fused_experts_impl`` does)
+        and the quant-scheme gate (``kFp8Static128BlockSym`` is exactly what we
+        implement here).
+        """
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEActivationFormat,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8Static128BlockSym,
+        )
+
+        if weight_key != kFp8Static128BlockSym:
+            return False, f"kernel does not support quantization scheme {weight_key}"
+        if activation_format != FusedMoEActivationFormat.Standard:
+            return False, f"{activation_format.value} activation format"
+        if not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
+            return False, "no act_and_mul MLP layer"
+        if not cls._supports_activation(moe_config.activation):
+            return False, f"{moe_config.activation} activation"
+        if not cls._supports_parallel_config(moe_config.moe_parallel_config):
+            return False, f"parallel config {moe_config.moe_parallel_config}"
+        if not cls._supports_routing_method(
+            moe_config.routing_method, weight_key, activation_key
+        ):
+            return False, f"routing method {moe_config.routing_method}"
+        if not cls._supports_shape(moe_config.hidden_dim):
+            return False, f"{moe_config.hidden_dim} hidden dim is not supported"
+        return True, None
+
     def apply(
         self,
         output: torch.Tensor,
