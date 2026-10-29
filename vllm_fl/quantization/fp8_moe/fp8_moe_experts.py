@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe import mk
+from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 
 
 def _flaggems_fused_experts(**kwargs) -> torch.Tensor:
