@@ -68,7 +68,7 @@ def install_fl_fp8_moe_selector() -> bool:
                 allow_vllm_cutlass,
             )
 
-        from vllm_fl.quantization.fp8_moe.moe_experts import TritonFp8ExpertsFL
+        from vllm_fl.quantization.fp8_moe.fp8_moe_experts import TritonFp8ExpertsFL
 
         logger.info_once(
             "Using TRITON FP8 MoE backend (FlagGems experts) for block-wise FP8."
