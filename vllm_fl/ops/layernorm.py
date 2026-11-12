@@ -6,6 +6,15 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm_fl.dispatch import CachedOp
 
 _rms_norm = CachedOp("rms_norm")
+_ppu_graph_rms = None
+
+
+def enable_ppu_graph_rms_norm() -> None:
+    """Enable only from the validated DeepSeek PPU PIECEWISE activation plan."""
+    global _ppu_graph_rms
+    from vllm_fl.models.deepseek_v32.graph_norm import graph_rms_forward
+
+    _ppu_graph_rms = graph_rms_forward
 
 
 class RMSNormFL(RMSNorm):
@@ -24,6 +33,8 @@ class RMSNormFL(RMSNorm):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        if _ppu_graph_rms is not None:
+            return _ppu_graph_rms(x, residual, self.weight, self.variance_epsilon)
         return _rms_norm(self, x, residual)
 
 

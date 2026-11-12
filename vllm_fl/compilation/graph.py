@@ -5,6 +5,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import json
+import os
 import weakref
 from collections import Counter
 from collections.abc import Callable
@@ -71,6 +73,7 @@ class GraphEntry:
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
     input_tensors: list[torch.Tensor] | None = None
+    replay_count: int = 0
 
 
 def _copy_graph_inputs(
@@ -138,11 +141,19 @@ class GraphWrapper:
         # enabling vLLM's full-model copy wrapper would clone dynamic views and
         # can change strides before Inductor sees them.
         self._copy_inputs = self.compilation_config.cudagraph_copy_inputs or (
-            current_platform.device_type in ("musa", "ptpu")
+            (
+                current_platform.device_type in ("musa", "ptpu")
+                or current_platform.vendor_name == "thead"
+            )
             and vllm_config.parallel_config.tensor_parallel_size > 1
             and runtime_mode == CUDAGraphMode.PIECEWISE
         )
 
+        self._record_graph_evidence = (
+            current_platform.vendor_name == "thead"
+            and runtime_mode == CUDAGraphMode.PIECEWISE
+            and os.environ.get("VLLM_FL_PPU_BF16_GRAPH_EVIDENCE", "0") == "1"
+        )
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
@@ -163,6 +174,18 @@ class GraphWrapper:
         self.concrete_graph_entries: dict[BatchDescriptor, GraphEntry] = {}
 
         GraphWrapper._all_instances.add(self)
+
+    def _emit_graph_evidence(self, event: str, entry: GraphEntry) -> None:
+        # First capture/replay only: no tensor inspection, synchronization,
+        # profiler, per-step logging or replacement of the executed operation.
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        print("FLAGOS_GRAPH_EVENT " + json.dumps({
+            "event": event, "rank": rank,
+            "mode": self.runtime_mode.name,
+            "num_tokens": entry.batch_descriptor.num_tokens,
+            "graph_id": id(entry.graph), "copy_inputs": self._copy_inputs,
+            "replay_count": entry.replay_count,
+        }), flush=True)
 
     def __getattr__(self, key: str) -> Any:
         # allow accessing the attributes of the runnable.
@@ -301,6 +324,8 @@ class GraphWrapper:
             entry.graph = graph
 
             compilation_counter.num_cudagraph_captured += 1
+            if self._record_graph_evidence:
+                self._emit_graph_evidence("capture", entry)
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly
@@ -331,4 +356,8 @@ class GraphWrapper:
                 entry.graph.replay()
         else:
             entry.graph.replay()
+        if self._record_graph_evidence:
+            entry.replay_count += 1
+            if entry.replay_count == 1:
+                self._emit_graph_evidence("replay", entry)
         return entry.output

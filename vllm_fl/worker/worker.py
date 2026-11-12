@@ -6,6 +6,7 @@
 
 import gc
 import os
+from vllm_fl.flaggems_runtime import should_record_oplist
 from collections.abc import Generator
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
@@ -273,7 +274,7 @@ class WorkerFL(WorkerBase):
 
             # Only rank 0 records the oplist to avoid file truncation and
             # interleaved writes when tensor-parallel-size > 1.
-            should_record = (rank == 0)
+            should_record = should_record_oplist(rank)
 
             # Use whitelist if specified (takes precedence over blacklist)
             if whitelist:
@@ -297,6 +298,15 @@ class WorkerFL(WorkerBase):
                 flag_gems.enable(
                     record=should_record, once=True, path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH
                 )
+
+        from vllm_fl.flaggems_runtime import emit_dispatch_receipt
+
+        emit_dispatch_receipt(
+            rank=rank,
+            local_rank=local_rank,
+            whitelist=whitelist if fl_envs.USE_FLAGGEMS else None,
+            blacklist=blacklist if fl_envs.USE_FLAGGEMS else None,
+        )
 
     # def sleep(self, level: int = 1) -> None:
     #     TODO(lms): rewrite CuMemAllocator

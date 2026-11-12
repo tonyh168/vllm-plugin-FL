@@ -5,7 +5,7 @@ import vllm_fl.activation as activation
 import vllm_fl.envs as fl_envs
 from vllm_fl.dispatch import get_default_manager
 from vllm_fl.dispatch.policy import PolicyManager
-from vllm_fl.flaggems_runtime import configure_flaggems
+from vllm_fl.flaggems_runtime import configure_flaggems, emit_dispatch_receipt, should_record_oplist
 from vllm_fl.ops.custom_ops import register_oot_ops
 from vllm_fl.models.glm5.runtime import validate_glm5_config
 from vllm_fl.utils import get_flag_gems_whitelist_blacklist
@@ -47,7 +47,7 @@ def initialize_glm5_worker(vllm_config, *, rank: int) -> bool:
         import flag_gems
 
         kwargs = dict(
-            record=rank == 0,
+            record=should_record_oplist(rank),
             once=True,
             path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH,
         )
@@ -66,4 +66,5 @@ def initialize_glm5_worker(vllm_config, *, rank: int) -> bool:
         whitelist=whitelist,
         blacklist=blacklist,
     )
+    emit_dispatch_receipt(rank=rank, whitelist=whitelist, blacklist=blacklist)
     return True

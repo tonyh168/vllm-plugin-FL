@@ -609,28 +609,76 @@ class TritonExpertsFL(TritonExperts):
             )
         )
 
-        _invoke_fused_moe_triton_kernel(
-            hidden_states,
-            w1,
-            intermediate_cache1,
-            a1q_scale,
-            self.w1_scale,
-            None,  # topk_weights
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            False,  # mul_routed_weights
-            top_k_num,
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a8=self.quant_config.use_int8_w8a8,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            per_channel_quant=self.per_act_token_quant,
-            block_shape=self.block_shape,
-            B_bias=self.w1_bias,
-        )
+        used_thead_up_silu = False
+        if (
+            getattr(runtime_platform, "vendor_name", None) == "thead"
+            and self._lora_context is None
+            and activation == MoEActivation.SILU
+            and self.quant_config.gemm1_clamp_limit is None
+            and not apply_router_weight_on_input
+            and expert_map is None
+            and not any(
+                (
+                    self.quant_config.use_fp8_w8a8,
+                    self.quant_config.use_int8_w8a8,
+                    self.quant_config.use_int8_w8a16,
+                    self.quant_config.use_int4_w4a16,
+                    self.per_act_token_quant,
+                )
+            )
+            and a1q_scale is None
+            and a2_scale is None
+            and self.w1_scale is None
+            and self.w2_scale is None
+            and self.w1_bias is None
+            and self.w2_bias is None
+            and self.block_shape is None
+            and w1.shape == (256, 512, 4096)
+            and w2.shape == (256, 4096, 256)
+            and w2.dtype == torch.bfloat16
+            and config.get("BLOCK_SIZE_M") == 16
+            and config.get("BLOCK_SIZE_N") == 64
+            and config.get("BLOCK_SIZE_K") == 128
+            and config.get("num_warps") == 4
+            and config.get("num_stages") == 4
+            and config.get("GROUP_SIZE_M") == 1
+            and config.get("SPLIT_K", 1) == 1
+            and not config.get("SWAP_AB", False)
+            and not config.get("PAIR_GATE_UP_DOT", False)
+        ):
+            from vllm_fl.ops.fused_moe.thead_up_silu import try_up_silu_out
+
+            used_thead_up_silu = try_up_silu_out(
+                hidden_states,
+                w1,
+                intermediate_cache2,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+            )
+        if not used_thead_up_silu:
+            _invoke_fused_moe_triton_kernel(
+                hidden_states,
+                w1,
+                intermediate_cache1,
+                a1q_scale,
+                self.w1_scale,
+                None,  # topk_weights
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                False,  # mul_routed_weights
+                top_k_num,
+                config,
+                compute_type=compute_type,
+                use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+                use_int8_w8a8=self.quant_config.use_int8_w8a8,
+                use_int8_w8a16=self.quant_config.use_int8_w8a16,
+                use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                per_channel_quant=self.per_act_token_quant,
+                block_shape=self.block_shape,
+                B_bias=self.w1_bias,
+            )
 
         # LoRA w13: applied to intermediate_cache1 before activation, using
         # hidden_states as the lora_a input.  moe_lora_align_block_size is
@@ -659,14 +707,15 @@ class TritonExpertsFL(TritonExperts):
                 top_k_num=top_k_num,
             )
 
-        apply_moe_activation(
-            activation,
-            intermediate_cache2,
-            intermediate_cache1.view(-1, N),
-            clamp_limit=self.quant_config.gemm1_clamp_limit,
-            alpha=self.gemm1_alpha,
-            beta=self.gemm1_beta,
-        )
+        if not used_thead_up_silu:
+            apply_moe_activation(
+                activation,
+                intermediate_cache2,
+                intermediate_cache1.view(-1, N),
+                clamp_limit=self.quant_config.gemm1_clamp_limit,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
+            )
 
         a2q_scale: torch.Tensor | None = None
 

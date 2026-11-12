@@ -551,6 +551,14 @@ def _convert_request_to_physical_indices(
     token_indices: torch.Tensor,
     block_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    from . import physical_decode_compact as _validated_physical
+
+    if _validated_physical.supports(
+        request_ids, block_table, token_indices, block_size
+    ):
+        return _validated_physical._convert_supported(
+            request_ids, block_table, token_indices, block_size
+        )
     token_indices_i64 = token_indices.to(torch.int64)
     request_ids_i64 = request_ids.to(torch.int64).reshape(-1, 1)
     block_ids = torch.div(token_indices_i64, block_size, rounding_mode="floor")
@@ -629,11 +637,20 @@ class FlagGemsSparseMLAImpl(SparseMLAAttentionImpl[FlagGemsSparseMLAMetadata]):
     ) -> None:
         if kv_cache.numel() == 0:
             return
+        slots = slot_mapping.flatten()
+        token_rows = kv_c_normed.shape[0]
+        slot_rows = slots.numel()
+        if k_pe.shape[0] != token_rows or slot_rows > token_rows:
+            raise ValueError(
+                "MLA cache slot prefix exceeds or mismatches padded token rows"
+            )
+        if slot_rows == 0:
+            return
         self._cache_writer(
-            kv_c_normed,
-            k_pe.squeeze(1),
+            kv_c_normed[:slot_rows],
+            k_pe[:slot_rows].squeeze(1),
             kv_cache,
-            slot_mapping.flatten(),
+            slots,
             kv_cache_dtype="auto" if kv_cache_dtype == "bfloat16" else kv_cache_dtype,
             scale=k_scale,
         )
