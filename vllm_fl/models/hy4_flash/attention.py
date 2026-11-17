@@ -9,7 +9,7 @@ from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
-from vllm_fl.models.hy4.attention import HYV4Attention
+from vllm_fl.models.hy4.model import HYV4Attention
 
 from .compressed_indexer import FlashCompressedIndexer
 from .config import SLIDING_ATTENTION
