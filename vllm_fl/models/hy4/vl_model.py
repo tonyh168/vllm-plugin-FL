@@ -63,6 +63,7 @@ class HYV4VLForConditionalGeneration(
     SupportsMRoPE,
     SupportsPP,
 ):
+    language_model_architecture = "HYV4ForCausalLM"
     """NVIDIA HYV4 VL composition using the existing HYV4 text model."""
 
     supports_mm_device_do_normalize = True
@@ -116,7 +117,7 @@ class HYV4VLForConditionalGeneration(
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=self.config.text_config,
-                architectures=["HYV4ForCausalLM"],
+                architectures=[self.language_model_architecture],
                 prefix=maybe_prefix(prefix, "language_model"),
             )
         self.make_empty_intermediate_tensors = (

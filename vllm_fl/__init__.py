@@ -271,6 +271,10 @@ def register_model():
 
     register_hy_v4_support()
 
+    from vllm_fl.models.hy4_flash.registration import register_hy_v4_flash_support
+
+    register_hy_v4_flash_support()
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them

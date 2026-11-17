@@ -120,7 +120,8 @@ class HYV4VLConfig(PretrainedConfig):
             rope.setdefault("mrope_interleaved", True)
             rope.setdefault("mrope_section", [12, 10, 10])
             text_kwargs["rope_parameters"] = rope
-            text = HYV4Config(**text_kwargs)
+            text_cls = self.sub_configs["text_config"]
+            text = text_cls(**text_kwargs)
         super().__init__(**outer_kwargs)
         self.text_config = text
         self.vision_config = (
