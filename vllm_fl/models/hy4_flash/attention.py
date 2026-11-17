@@ -25,6 +25,12 @@ class HYV4FlashAttention(HYV4Attention):
         nope = config.swa_qk_nope_head_dim if self.is_window_layer else config.qk_nope_head_dim
         rope = config.swa_qk_rope_head_dim if self.is_window_layer else config.qk_rope_head_dim
         value = config.swa_v_head_dim if self.is_window_layer else config.v_head_dim
+        # Sliding layers have full sparse-MLA top-k semantics (a causal window),
+        # not the parent's dense-MLA-without-indexer path.
+        sparse_layer_types = getattr(config, "_SPARSE_LAYER_TYPES", None)
+        if sparse_layer_types is None:
+            from vllm_fl.models.hy4 import attention as hy4_attention
+            hy4_attention._SPARSE_LAYER_TYPES = set(hy4_attention._SPARSE_LAYER_TYPES) | {SLIDING_ATTENTION}
         super().__init__(
             vllm_config=vllm_config, config=config, hidden_size=config.hidden_size,
             num_heads=heads, qk_nope_head_dim=nope, qk_rope_head_dim=rope,
