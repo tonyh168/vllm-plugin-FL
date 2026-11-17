@@ -15,7 +15,7 @@ from transformers import PretrainedConfig
 # ``hy_v4`` implementation is a plain ``SupportsPP`` causal LM.  The plugin
 # therefore serves the text path only and must fail fast if a checkpoint ever
 # advertises a vision tower, rather than silently dropping those parameters.
-_MULTIMODAL_KEY_PREFIXES = ("vision_", "image_", "video_", "audio_", "pixel_")
+_MULTIMODAL_KEY_PREFIXES = ("image_", "video_", "audio_", "pixel_")
 _MULTIMODAL_KEY_EXACT = frozenset(
     {
         "multi_modal_projector",
