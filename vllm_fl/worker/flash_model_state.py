@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""V2 runner state supplying Engram's exact two-token lookback window."""
+"""Minimal model-state interface for Flash V2 lookback input."""
 
 from typing import Any
 
