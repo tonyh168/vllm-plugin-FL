@@ -7,9 +7,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
-from vllm.model_executor.models.utils import make_layers
 from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
 
 from vllm_fl.models.hy4.model import (
     HYV4DecoderLayer,
