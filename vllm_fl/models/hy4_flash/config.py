@@ -43,16 +43,18 @@ class HYV4FlashConfig(HYV4Config):
     def validate_flash_config(self):
         if any(kind not in (SPARSE_ATTENTION, SLIDING_ATTENTION) for kind in self.layer_types):
             raise ValueError("HYV4 Flash requires sparse or sliding attention layers")
-        if not self.use_compressed_indexer:
+        if not getattr(self, "use_compressed_indexer", True):
             raise ValueError("HYV4 Flash requires compressed IndexPool")
-        if not self.compressed_indexer_skip_fine_select or self.compressed_indexer_reuse_fine_indexer:
+        if not getattr(self, "compressed_indexer_skip_fine_select", True) or getattr(self, "compressed_indexer_reuse_fine_indexer", False):
             raise ValueError("Only independent coarse-only IndexPool is supported")
-        if self.compressed_indexer_key_pooling != "gated":
+        if getattr(self, "compressed_indexer_key_pooling", "gated") != "gated":
             raise ValueError("Only gated IndexPool is supported")
-        ratio = self.compressed_indexer_compress_ratio
-        if self.compressed_indexer_group_topk * ratio != self.index_topk:
+        ratio = getattr(self, "compressed_indexer_compress_ratio", 4)
+        group_topk = getattr(self, "compressed_indexer_group_topk", 512)
+        candidate_topk = getattr(self, "compressed_indexer_candidate_topk", self.index_topk)
+        if group_topk * ratio != self.index_topk:
             raise ValueError("IndexPool group_topk * ratio must equal index_topk")
-        if self.index_topk != self.compressed_indexer_candidate_topk:
+        if self.index_topk != candidate_topk:
             raise ValueError("IndexPool candidate_topk must equal index_topk")
 
 
