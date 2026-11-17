@@ -131,12 +131,6 @@ class HYV4FlashForCausalLM(HYV4ForCausalLM):
     supports_pp = False
     requires_raw_input_tokens = True
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_stacked={
-            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
-            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
-            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
-            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
-        },
         orig_to_new_substr={".compressed_indexer.": ".indexer."},
     )
 
