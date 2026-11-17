@@ -49,7 +49,7 @@ class HYV4FlashVLProcessingInfo(HYV4VLProcessingInfo):
 class HYV4FlashForConditionalGeneration(HYV4VLForConditionalGeneration):
     language_model_architecture = "HYV4FlashForCausalLM"
     requires_raw_input_tokens = True
-    supports_pp = False
+    supports_pp = False  # type: ignore[assignment]
 
     def __init__(self, *, vllm_config, prefix=""):
         validate_runtime(vllm_config)
