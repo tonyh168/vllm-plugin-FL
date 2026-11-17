@@ -115,7 +115,11 @@ class HYV4VLConfig(PretrainedConfig):
                 text_kwargs.pop(key, None)
             legacy_rope = text_kwargs.pop("rope_scaling", None)
             rope = dict(legacy_rope or {})
-            rope.update(text_kwargs.get("rope_parameters") or {})
+            nested_rope = text_kwargs.get("rope_parameters") or {}
+            # Nested per-layer RoPE belongs to the text config; forwarding its
+            # layer-type keys as outer VL fields breaks validate_rope().
+            if not any(isinstance(value, dict) for value in nested_rope.values()):
+                rope.update(nested_rope)
             rope.setdefault("rope_type", "default")
             rope.setdefault("mrope_interleaved", True)
             rope.setdefault("mrope_section", [12, 10, 10])
