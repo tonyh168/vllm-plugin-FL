@@ -27,6 +27,9 @@ class HYV4FlashAttention(HYV4Attention):
         value = config.swa_v_head_dim if self.is_window_layer else config.v_head_dim
         # Sliding layers have full sparse-MLA top-k semantics (a causal window),
         # not the parent's dense-MLA-without-indexer path.
+        # Flash has no shared indexers: every sparse and sliding layer owns
+        # its top-k producer.  Do not inherit the sparse-only layer filter.
+        config.indexer_types = ["full"] * config.num_hidden_layers
         sparse_layer_types = getattr(config, "_SPARSE_LAYER_TYPES", None)
         if sparse_layer_types is None:
             from vllm_fl.models.hy4 import attention as hy4_attention
