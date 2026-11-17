@@ -30,6 +30,8 @@ class HYV4FlashAttention(HYV4Attention):
         # Flash has no shared indexers: every sparse and sliding layer owns
         # its top-k producer.  Do not inherit the sparse-only layer filter.
         config.indexer_types = ["full"] * config.num_hidden_layers
+        # Deep-copied config retains all sparse-MLA flags when the parent
+        # computes its sparse-layer predicate.
         sparse_layer_types = getattr(config, "_SPARSE_LAYER_TYPES", None)
         if sparse_layer_types is None:
             from vllm_fl.models.hy4 import attention as hy4_attention
