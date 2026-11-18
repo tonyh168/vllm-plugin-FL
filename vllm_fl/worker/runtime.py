@@ -39,10 +39,12 @@ def _initialize_fl_runtime(rank: int) -> None:
         logger.info("[FlagGems] Disable the following ops: %s", blacklist)
         from vllm.platforms import current_platform
 
-        if getattr(current_platform, "vendor_name", None) == "amd":
+        if getattr(current_platform, "vendor_name", None) in ("amd", "iluvatar"):
             # enable(unused=...) does not actually exclude every operator in
-            # FlagGems 5.4.0, which AMD depends on; see _enable_except. Scoped
-            # to AMD so the other backends keep their proven call unchanged.
+            # FlagGems (aten::empty.memory_format / zeros still get replaced).
+            # Iluvatar needs the giant KV backing allocation to use native
+            # ATen: the FlagGems Triton kernel launches >16M blocks and the
+            # driver rejects it with "invalid argument".
             _enable_except(flag_gems, blacklist, common)
         else:
             flag_gems.enable(unused=blacklist, **common)

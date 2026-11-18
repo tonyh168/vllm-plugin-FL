@@ -166,13 +166,18 @@ def _C_ops_present() -> bool:
     return any(hasattr(ops, name) for name in names)
 
 
-def register_op_schemas():
-    """Register missing vLLM schemas in their upstream namespaces."""
+def register_op_schemas(force: bool = False):
+    """Register missing vLLM schemas in their upstream namespaces.
+
+    ``force`` defines the remaining schemas even when another provider (for
+    example FlagGems' ``patch_empty_vllm``) already registered some ``_C``
+    kernels.  Existing schemas and impls are skipped/suppressed.
+    """
     if getattr(register_op_schemas, "_libs", None) is not None:
         return
 
     # Bail out before touching vllm._C when the active backend already owns _C.
-    if _is_metax_backend() or _C_ops_present():
+    if not force and (_is_metax_backend() or _C_ops_present()):
         logger.debug(
             "Skipping vllm._C import: _C ops are already provided by the active backend"
         )

@@ -166,9 +166,28 @@ def _patch_custom_ops():
     except (ImportError, OSError) as e:
         logger.debug("Failed to import vllm_fl._C: %s", e)
 
+    # Iluvatar empty wheel: bind FlagGems Triton implementations (silu,
+    # rms_norm, ...) BEFORE schema registration.  The registry installs a
+    # CUDA fallback for apply_repetition_penalties_ that would otherwise
+    # collide inside flag_gems.patch_empty_vllm().
+    vendor_name = None
+    try:
+        from vllm_fl.utils import DeviceInfo
+
+        vendor_name = DeviceInfo().vendor_name
+        if vendor_name == "iluvatar":
+            import flag_gems
+
+            flag_gems.patch_empty_vllm()
+    except Exception as exc:  # pragma: no cover - optional acceleration
+        logger.warning("[vllm_fl] FlagGems patch_empty_vllm failed: %s", exc)
+
     from vllm_fl.ops._C_ops_registry import register_op_schemas
 
-    register_op_schemas()
+    # On Iluvatar patch_empty_vllm() registers a few _C kernels first, which
+    # makes _C_ops_present() true; force the remaining schemas (notably
+    # get_cuda_view_from_cpu_tensor) so the Engram UVA path exists.
+    register_op_schemas(force=vendor_name == "iluvatar")
 
 
 def _init_vendor_device():
@@ -397,6 +416,22 @@ def register_model():
         # General plugins run before encoder budgets are built in the engine
         # frontend and spawned workers, for both upstream model runners.
         patch_minicpmo_audio_budget()
+
+    if vendor_name in ("nvidia", "iluvatar"):
+        from vllm_fl.models.hy_v4_flash.registration import register_hy4_flash
+
+        register_hy4_flash()
+
+    if vendor_name == "iluvatar":
+        # Empty wheel has no vllm._C FlashMLA/DeepGEMM; importing the shims
+        # binds FlagGems-vllm Triton kernels in their place.
+        from vllm_fl.dispatch.backends.vendor.iluvatar.shims import (  # noqa: F401
+            _fl_iluvatar_deepgemm_ops,
+            _fl_iluvatar_empty_ops,
+            _fl_iluvatar_gems_flashmla,
+            _fl_iluvatar_quant_compat,
+            _fl_iluvatar_uva,
+        )
 
     if vendor_name == "ascend":
         # Import registers the ModelSlim quantization config before model
