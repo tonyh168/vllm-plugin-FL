@@ -174,6 +174,74 @@ class HYV4FlashModel(HYV4Model):
         self.token_lookback_depth = (
             self.config.engram_max_ngram_size - 1 if self.engram_hash is not None else 0
         )
+        # ---- DEBUG: env-gated per-layer hidden-state dump ----
+        import os as _os
+
+        _dump_dir = _os.environ.get("HY4_DUMP_DIR", "").strip()
+        if _dump_dir:
+            self._install_layer_dump(_dump_dir)
+
+    def _install_layer_dump(self, outdir: str) -> None:
+        import os
+
+        ranks = {
+            r.strip()
+            for r in os.environ.get("HY4_DUMP_RANKS", "0").split(",")
+            if r.strip()
+        }
+        try:
+            import torch.distributed as _dist
+
+            rank = (
+                _dist.get_rank()
+                if _dist.is_available() and _dist.is_initialized()
+                else int(os.environ.get("RANK", "0"))
+            )
+        except Exception:
+            rank = int(os.environ.get("RANK", "0"))
+        if ranks and str(rank) not in ranks:
+            return
+        outdir = os.path.join(outdir, f"rank_{rank:04d}")
+        os.makedirs(outdir, exist_ok=True)
+        max_calls = int(os.environ.get("HY4_DUMP_MAX_CALLS", "4"))
+        min_tokens = int(os.environ.get("HY4_DUMP_MIN_TOKENS", "2"))
+        max_tokens = int(os.environ.get("HY4_DUMP_MAX_TOKENS", "64"))
+        state = {"n": 0}
+
+        def _mk(name):
+            def _hook(module, inputs, output):
+                t = output[0] if isinstance(output, tuple) else output
+                if not isinstance(t, torch.Tensor) or t.dim() < 2:
+                    return
+                n = state["n"]
+                if name == "embed":
+                    state["n"] = n + 1
+                if n >= max_calls or t.shape[0] < min_tokens or t.shape[0] > max_tokens:
+                    return
+                torch.save(
+                    t.detach().to(torch.float32).cpu(),
+                    os.path.join(
+                        outdir, f"call{n:02d}_len{t.shape[0]:04d}_{name}.pt"
+                    ),
+                )
+
+            return _hook
+
+        if (
+            isinstance(self.embed_tokens, nn.Module)
+            and type(self.embed_tokens).__name__ != "PPMissingLayer"
+        ):
+            self.embed_tokens.register_forward_hook(_mk("embed"))
+        for i, layer in enumerate(self.layers):
+            layer.register_forward_hook(_mk(f"layer{i:02d}"))
+        if (
+            isinstance(self.norm, nn.Module)
+            and type(self.norm).__name__ != "PPMissingLayer"
+        ):
+            self.norm.register_forward_hook(_mk("norm"))
+        hc_head = getattr(self, "hc_head", None)
+        if isinstance(hc_head, nn.Module) and type(hc_head).__name__ != "PPMissingLayer":
+            hc_head.register_forward_hook(_mk("hc_head"))
 
     def forward(
         self,
@@ -509,3 +577,79 @@ class HYV4FlashForCausalLM(HYV4ForCausalLM):
             )
             self._loaded_weights.update(loaded)
             return loaded
+
+# >>> HY4_ROUTING_DUMP >>>
+
+import os as _hy4_os
+
+if (
+    _hy4_os.environ.get("HY4_DUMP_DIR", "").strip()
+    and _hy4_os.environ.get("HY4_DUMP_ROUTING", "") == "1"
+):
+    def _hy4_install_routing_dump():
+        import re as _re
+        import torch as _torch
+        import torch.distributed as _dist
+        from vllm_fl.models.hy_v4_flash import base_moe as _bm
+
+        ranks = {
+            r.strip()
+            for r in _hy4_os.environ.get("HY4_DUMP_RANKS", "0").split(",")
+            if r.strip()
+        }
+        try:
+            rank = (
+                _dist.get_rank()
+                if _dist.is_available() and _dist.is_initialized()
+                else int(_hy4_os.environ.get("RANK", "0"))
+            )
+        except Exception:
+            rank = int(_hy4_os.environ.get("RANK", "0"))
+        if ranks and str(rank) not in ranks:
+            return
+        outdir = _hy4_os.path.join(
+            _hy4_os.environ["HY4_DUMP_DIR"].strip(), f"rank_{rank:04d}"
+        )
+        _hy4_os.makedirs(outdir, exist_ok=True)
+        max_calls = int(_hy4_os.environ.get("HY4_DUMP_MAX_CALLS", "8"))
+        min_tokens = int(_hy4_os.environ.get("HY4_DUMP_MIN_TOKENS", "2"))
+        max_tokens = int(_hy4_os.environ.get("HY4_DUMP_MAX_TOKENS", "64"))
+        state = {}
+        orig = _bm.HYV4MoEFused._flash_routing
+
+        def patched(self, hidden_states, gating_output, topk, renormalize):
+            out = orig(self, hidden_states, gating_output, topk, renormalize)
+            try:
+                m = _re.search(r"layers\.(\d+)", getattr(self, "prefix", ""))
+                li = int(m.group(1)) if m else -1
+                n = state.get(li, 0)
+                state[li] = n + 1
+                T = int(gating_output.shape[0])
+                if (
+                    n < max_calls
+                    and min_tokens <= T <= max_tokens
+                    and isinstance(out, tuple)
+                    and len(out) >= 2
+                ):
+                    rec = {
+                        "gating": gating_output.detach().to(_torch.float32).cpu(),
+                        "weights": out[0].detach().to(_torch.float32).cpu(),
+                        "ids": out[1].detach().to(_torch.int64).cpu(),
+                    }
+                    _torch.save(
+                        rec,
+                        _hy4_os.path.join(
+                            outdir, f"routing_layer{li:02d}_call{n:02d}_len{T:04d}.pt"
+                        ),
+                    )
+            except Exception as exc:  # pragma: no cover - debug only
+                if state.get("_err_logged") != str(exc):
+                    state["_err_logged"] = str(exc)
+                    print("[HY4_DUMP] routing dump error:", exc)
+            return out
+
+        _bm.HYV4MoEFused._flash_routing = patched
+        print(f"[HY4_DUMP] routing dump installed rank={rank} -> {outdir}")
+
+    _hy4_install_routing_dump()
+# <<< HY4_ROUTING_DUMP <<<
