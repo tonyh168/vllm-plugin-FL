@@ -861,6 +861,9 @@ class HYV4ForCausalLM(
                 print(f"[hy4-loader-dbg] iter {name} shape={tuple(loaded_weight.shape)}", flush=True)
             if name.startswith("model.mtp_layers."):
                 continue
+            if name.startswith("model.dfly_layers."):
+                # [dfly-skip] auxiliary draft/confidence module (no AR forward use)
+                continue
             if "rotary_emb.inv_freq" in name:
                 continue
             if is_skip_topk_indexer_weight(name, skip_topk_layers):
