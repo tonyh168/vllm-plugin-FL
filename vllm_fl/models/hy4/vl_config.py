@@ -113,6 +113,12 @@ class HYV4VLConfig(PretrainedConfig):
             text_kwargs = {**kwargs, **(text_config or {})}
             for key in metadata_keys:
                 text_kwargs.pop(key, None)
+            # [vl-config-mm-drop] Converted checkpoints may leave VL token ids in
+            # the nested text_config; they belong to this wrapper, not HYV4Config.
+            for key in [k for k in text_kwargs
+                        if k.startswith(("vision_", "image_", "video_",
+                                         "audio_", "pixel_"))]:
+                text_kwargs.pop(key, None)
             legacy_rope = text_kwargs.pop("rope_scaling", None)
             rope = dict(legacy_rope or {})
             rope.update(text_kwargs.get("rope_parameters") or {})
