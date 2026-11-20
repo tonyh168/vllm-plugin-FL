@@ -187,15 +187,26 @@ def validate_hy4_runtime(vllm_config) -> HY4RuntimePlan:
     graph_paged_logits = paged_logits.kind == BackendImplKind.VENDOR or (
         getattr(paged_logits.fn, "_supports_cuda_graph", lambda: False)()
     )
+    # [graph-debug] 当 breakable cudagraph 生效（PIECEWISE）时，sparse indexer
+    # 与 MLA attention 都是 @eager_break_during_capture 的断点，会在图段之间
+    # 以 eager 执行、拿到真实 attn_metadata 与 context_lens，因此不会把
+    # `max_ctx = int(context_lens.max().item())` 和 grid 冻结进图。
+    # 此时强制 enforce_eager 是没有必要的，放行。
+    from vllm.compilation.breakable_cudagraph import (
+        is_breakable_cudagraph_enabled as _fl_breakable_enabled,
+    )
+
+    _fl_graph_safe = graph_paged_logits or _fl_breakable_enabled()
     if (
         not native_indexer
-        and not graph_paged_logits
+        and not _fl_graph_safe
         and not getattr(vllm_config.model_config, "enforce_eager", True)
     ):
         raise ValueError(
             "HY4 portable sparse indexer currently requires enforce_eager=True: "
             "the selected paged MQA logits API has no graph-safe entry point; "
-            "upgrade the operator library or use enforce_eager=True"
+            "upgrade the operator library, enable VLLM_USE_BREAKABLE_CUDAGRAPH "
+            "with PIECEWISE cudagraph, or use enforce_eager=True"
         )
     cache = _resolve_registered_operator("concat_and_cache_mla")
     concat = _resolve_registered_operator("concat_mla_q")
